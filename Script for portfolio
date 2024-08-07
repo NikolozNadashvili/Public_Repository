@@ -28,7 +28,7 @@ DROP TABLE IF EXISTS #personalN,#MCandCash,#paybox,InternalControlDB.dbo.temptea
 
 
 DECLARE @off_code AS NVARCHAR(50)
-SET @off_code = '5412'  ---აქ მოსაფიქრებელია გადაწერილ ოფიცრებზე
+SET @off_code = '5412'  
 
 
 
