@@ -1,0 +1,324 @@
+USE [RiskDB]
+GO
+
+/****** Object:  StoredProcedure [dbo].[FPD_SPD_ICL]    Script Date: 8/12/2024 6:00:30 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ALTER PROCEDURE  
+--exec 
+[dbo].[FPD_SPD_ICL]
+AS
+BEGIN
+
+
+-- =============================================
+-- Procedure: Riskdb.dbo.FPD_SPD_ICL
+-- Created By: Nikoloz Nadashvili
+-- Created Date: 2024/03/19
+-- Last Script Update Date:  2024/04/16
+-- AVG run time : 3 min
+/*
+ Description: 
+
+ The FPD (First Payment Default) metric is refers to the scenario 
+ where a borrower fails to make their first scheduled payment on a loan or credit obligation.
+ FPD 7/15/30/90 - means after he fail his first schedule,if he was in overdue 7/15/30/90 days
+
+ This procedure calculates FPD and SPD for the 
+ ICL and inserting it in SPD_ICL  & FPD_ICL tables. It is used for various reports in PBI 
+ and also can be used just for calculate FPD in SQL.
+
+ I also have Riskdb.calc.FPD_SPD_POS which have same logic and 
+ together thoose two tables is unioned on View:riskdb.calc.FSPD_all
+
+ Sometimes 6, 14, 29, 89(u will have question why not 7,15,30,90) can be confusing,
+ but it's done because of specific database data filling of overdue.
+ */
+-- =============================================
+
+
+
+
+DROP TABLE IF EXISTS #Snaps, #FPDfinal,#result; -- Drop temp tables if they exist
+
+
+-- Populate #Snaps with loan snapshots from the previous day 
+SELECT a.AccountId,
+CASE WHEN a.overduedays IS NULL THEN 0 ELSE a.overduedays END AS [overduedays] --taking overdue for this day
+INTO #Snaps
+FROM riskdb.[dbo].[vwLoanSnapshots] AS a with(nolock)
+WHERE a.calculationdate  = CAST(DATEADD(DAY, -1, GETDATE()) AS DATE)
+and a.Snap_Type =1
+and a.principalbalance > 0;
+
+--column which i will need to calculate fpd 
+ SELECT
+    v.AccountId,
+    MIN(CASE WHEN v.ActivationDate IS NOT NULL AND (v.NextPaymentDate < v.ClosedDate OR ClosedDate IS NULL) THEN v.NextPaymentDate END) AS FirstPaymentDate,
+    MAX(v.OverdueDays) AS MaxOverdue, 
+    MAX(v.ClosedDate) AS MaxClosedDate,
+  --  MAX(CASE WHEN v.OverdueDays = 0 THEN v.NextPaymentDate END) AS LastRepaymentDate,--at this time i dont use it in report
+	MIN(v.activationdate) AS activationdate
+INTO #Result
+FROM RiskDB.dbo.vwLoanSnapshots AS v
+WHERE v.Snap_Type =1
+GROUP BY v.AccountId;
+
+/*
+here I join two tables to myself, but after 7 days, so that, for example, I can calculate FPD7
+I do this to see after 7 days whether it was overdue
+I have (6,7) written in my script because often before the first payment arrives, this date is changed, and in order not to miss such cases, I join on both
+In the select section, I'm retrieving records based on calculations and checking if they are present шn the corresponding overdue list.
+If they are, then it should return the overdue date 
+*/
+	SELECT 
+    ST.AccountId,
+    MAX(CASE WHEN ST.DaysDiff IN(0,1)   AND	ST.OverdueDays >= 1 THEN    ST.CalculationDate END) AS FPD1,
+    MAX(CASE WHEN ST.DaysDiff IN(6,7)   AND	ST.OverdueDays >= 7 THEN    ST.CalculationDate  END) AS FPD7,
+    MAX(CASE WHEN ST.DaysDiff IN(14,15) AND ST.OverdueDays >= 15 THEN  ST.CalculationDate  END) AS FPD15,
+    MAX(CASE WHEN ST.DaysDiff IN(29,30) AND ST.OverdueDays >= 30 THEN  ST.CalculationDate  END) AS FPD30,
+    MAX(CASE WHEN ST.DaysDiff IN(89,90) AND ST.OverdueDays >= 90 THEN  ST.CalculationDate  END) AS FPD90
+	INTO #FPDfinal
+FROM     (    SELECT  
+        v2.AccountId,
+        DATEDIFF(DAY, fpd.FirstPaymentDate, v2.CalculationDate) AS DaysDiff,
+        v2.CalculationDate AS CalculationDate,
+        v2.OverdueDays
+    FROM       RiskDB.dbo.vwLoanSnapshots  AS v2 WITH(NOLOCK)
+			   INNER JOIN #Result AS fpd ON fpd.AccountId = v2.AccountId AND (DATEDIFF(DAY, fpd.FirstPaymentDate, v2.CalculationDate) IN (0,1,6,7,14,15,29,30,89,90))    ) AS ST
+GROUP BY AccountId
+
+--deleting data in table and after that fill it with new
+TRUNCATE TABLE RiskDB.calc.FPD_ICL
+INSERT INTO RiskDB.calc.FPD_ICL
+	SELECT 
+		[LoanID] = a.ID_D,
+		[PINFL] = a.in_form_pers_id,
+		[New/Repeated Client] = a.[6m_status],
+		[Segment] = a.fn_high_segment,
+		[Antifraud_score] = r.fn_anti_fraud_score,
+		[TMX_score] = r.in_tmx_policy_score,
+		[Is Active] = CASE WHEN s.AccountId IS NULL THEN 0 ELSE 1 END ,
+		[Issue_Date] = CAST(COALESCE(f.ActivationDate,a.fn_today) AS DATE),
+		[ClosedDate] = CAST(f.MaxCloseddate AS DATE),
+		[ICL/POS] = 'ICL',
+		[SubProduct] = a.Product_Subtype,
+		[Add_Loan] = CAST(a.fn_tbc_add_loan_indicator AS INT),
+		[Application_amount] = a.in_form_appl_amnt,
+		[Offered_Amount] = a.fn_final_offered_amnt,
+		[Disbursed_Amount] = a.Disbursed_Amount,
+		[First_Payment_Date] = CAST(f.FirstPaymentDate AS DATE),
+		--[Last_Repayment_Date] =cast(l.Last_Repayment_Date as date),
+		[Current_Overdue_Days] = CASE WHEN s.OverdueDays IS NULL THEN 0 ELSE s.OverdueDays END ,
+		[Max_Overdue_Days] = f.MaxOverdue,
+		[Matured for FPD1]=  CASE WHEN f.MaxCloseddate >= F.FirstPaymentDate THEN 1 WHEN f.MaxCloseddate < F.FirstPaymentDate THEN 0 WHEN	CAST(GETDATE() AS DATE) > F.FirstPaymentDate THEN 1 ELSE 0 END ,
+		[Matured for FPD7] = CASE WHEN f.MaxCloseddate >= DATEADD(DAY ,6,f.FirstPaymentDate)    THEN 1 WHEN f.MaxCloseddate <  DATEADD(DAY ,6,f.FirstPaymentDate) THEN 0 WHEN	CAST(GETDATE() AS DATE) > DATEADD(DAY ,6,f.FirstPaymentDate)   THEN 1 ELSE 0 END  ,
+		[Matured for FPD15]= CASE WHEN f.MaxCloseddate >= DATEADD(DAY, 14, f.FirstPaymentDate)  THEN 1 WHEN f.MaxCloseddate <  DATEADD(DAY ,14,f.FirstPaymentDate) THEN 0 WHEN	CAST(GETDATE() AS DATE) > DATEADD(DAY, 14, f.FirstPaymentDate) THEN 1 ELSE 0 END ,
+		[Matured for FPD30]= CASE WHEN f.MaxCloseddate >= DATEADD(DAY, 29, f.FirstPaymentDate)  THEN 1 WHEN f.MaxCloseddate <  DATEADD(DAY ,29,f.FirstPaymentDate) THEN 0 WHEN	CAST(GETDATE() AS DATE) > DATEADD(DAY, 29, f.FirstPaymentDate) THEN 1 ELSE 0 END ,
+		[Matured for FPD90]= CASE WHEN f.MaxCloseddate >= DATEADD(DAY, 89, f.FirstPaymentDate)  THEN 1 WHEN f.MaxCloseddate <  DATEADD(DAY ,89,f.FirstPaymentDate) THEN 0 WHEN	CAST(GETDATE() AS DATE) > DATEADD(DAY, 89, f.FirstPaymentDate) THEN 1 ELSE 0 END ,
+/*
+i will explain Matured formula for FPD15,because is improtant when we calculating FPD(we calculating it from Matured,now from all disbursed)
+1.Closedate > FirstPaymentDate + 14 days -- If that true, then its matured
+2.Closedate <  FirstPaymentDate  + 14 days -- If that true,then its NOT matured
+3.Third Check its when Closedate is null,that means that loan is still active
+so we are comparing if today > first payment date+ 14 days 
+
+*/
+		
+		[FPD1]  = CASE WHEN COALESCE(fpd.FPD1,fpd.FPD7,fpd.FPD15,fpd.FPD30,fpd.FPD90) IS NOT NULL THEN 1 ELSE 0 END ,
+        [FPD7]  = CASE WHEN COALESCE(fpd.FPD7,fpd.FPD15,fpd.FPD30,fpd.FPD90)  IS NOT NULL THEN 1 ELSE 0 END,
+        [FPD15] = CASE WHEN COALESCE(fpd.FPD15,fpd.FPD30,fpd.FPD90) IS NOT NULL THEN 1 ELSE 0 END,
+        [FPD30] = CASE WHEN COALESCE(fpd.FPD30,fpd.FPD90) IS NOT NULL THEN 1 ELSE 0 END,
+        [FPD90] = CASE WHEN fpd.FPD90 IS NOT NULL THEN 1 ELSE 0 END,
+
+
+        
+        [FPD1 Date] =  CASE WHEN fpd.FPD1 IS NOT NULL THEN  DATEADD(DAY,1,CAST(f.FirstPaymentDate AS DATE)) END ,
+        [FPD7 Date] =  CASE WHEN fpd.FPD7 IS NOT NULL THEN  DATEADD(DAY,7,CAST(f.FirstPaymentDate AS DATE)) END ,
+        [FPD15 Date] = CASE WHEN fpd.FPD15 IS NOT NULL THEN  DATEADD(DAY,15,CAST(f.FirstPaymentDate AS DATE)) END,
+        [FPD30 Date] = CASE WHEN fpd.FPD30 IS NOT NULL THEN  DATEADD(DAY,30,CAST(f.FirstPaymentDate AS DATE)) END,
+        [FPD90 Date] = CASE WHEN fpd.FPD90 IS NOT NULL THEN  DATEADD(DAY,90,CAST(f.FirstPaymentDate AS DATE)) END,
+		[App_time]= a.date_start,
+		a.Merchant
+	FROM riskdb.[dbo].[ICL_Apps] AS a WITH(NOLOCK) -- this is base becasue nere we have data without whitelists,test applications and so on
+		LEFT JOIN #Snaps AS s ON s.accountid = a.ID_D
+		LEFT JOIN #Result AS f ON f.AccountId = a.ID_D
+		LEFT JOIN #FPDfinal AS fpd ON fpd.AccountId = a.ID_D
+		LEFT JOIN  (SELECT 
+						CONCAT(CASE WHEN r.in_baas_application = 1 AND p.IABS_loan_id IS NOT NULL THEN  p.IABS_loan_id
+						WHEN r.in_baas_application = 1 AND p.IABS_loan_id IS NULL THEN r.appl_id
+						WHEN r.in_baas_application = 0 OR r.in_baas_application IS NULL THEN r.appl_id ELSE NULL END, r.in_form_pers_id) AS corr_id,
+						r.fn_anti_fraud_score,
+						r.in_tmx_policy_score
+						FROM db.wings.score_icl AS r WITH(NOLOCK)
+		LEFT JOIN	DB.dbo.v_risk_PaymeLoanApplications AS p WITH(NOLOCK) ON r.appl_id = p.wings_applid ) AS r
+		ON a.ID_Pers = r.corr_id-- this join only
+		--because fraud team need to see antifraud and TMX scores.
+WHERE a.Disbursed = '1' 
+
+
+/*
+below is logic for spd 
+In general - logic is same,only difference that im calculating first,second and third payment date and using all same 
+but for second payment date
+*/
+
+
+
+DROP TABLE IF EXISTS #SPD,#ResultSPD,#SPDfinal,#test
+--------------SPD Part
+--finding second payment date 
+/*
+
+ in first subquery im calculating  MinCalculationDate for all payments grouped by id and nextpaymentdate
+in second subquery which i using in codintion of from im just rowing it to know which one is first,second or third payment daye
+and in select im taking thoose data and just give this names
+
+after that all logic is same as in FPD
+				*/
+
+SELECT DISTINCT
+    b.AccountId,
+    MAX(CASE WHEN b.rn = 1 THEN b.NextPaymentDate END) AS FirstPaymentDate,
+    MAX(CASE WHEN b.rn = 2 THEN b.NextPaymentDate END) AS SecondPaymentDate,
+	MAX(CASE WHEN b.rn = 3 THEN b.NextPaymentDate END) AS ThirdPaymentDate
+		INTO #SPD
+	FROM	( SELECT a.AccountId,
+		 a.NextPaymentDate,
+        a.MinCalculationDate,
+        ROW_NUMBER() OVER (PARTITION BY a.AccountId ORDER BY a.NextPaymentDate) AS rn	
+ FROM (    SELECT
+        v2.AccountId,
+        v2.NextPaymentDate,
+        MIN(v2.CalculationDate) AS MinCalculationDate 
+    FROM  RiskDB.dbo.vwLoanSnapshots AS v2 
+    WHERE v2.NextPaymentDate IS NOT NULL
+    AND (v2.NextPaymentDate < v2.ClosedDate OR ClosedDate IS NULL) AND v2.Snap_Type =1
+    GROUP BY v2.AccountId, v2.NextPaymentDate) AS a 	
+	WHERE a.NextPaymentDate IS NOT NULL AND CAST(a.NextPaymentDate AS DATE) !='0001-01-01') AS b
+	GROUP BY b.AccountId
+
+
+
+	
+
+	--taking columns to calculate spd 
+
+ SELECT
+    v.AccountId,
+    MIN(CASE WHEN v.ActivationDate IS NOT NULL AND  v.NextPaymentDate IS NOT NULL  AND (v.NextPaymentDate < v.ClosedDate OR ClosedDate IS NULL AND v.Snap_Type =1
+	AND v.NextPaymentDate>=s.SecondPaymentDate AND v.NextPaymentDate <s.ThirdPaymentDate) THEN v.NextPaymentDate END) AS SecondPaymentDate,
+    MAX(v.OverdueDays) AS MaxOverdue,
+    MAX(v.ClosedDate) AS MaxClosedDate,
+ --   MAX(CASE WHEN v.OverdueDays = 0 THEN v.NextPaymentDate END) AS LastRepaymentDate,
+	MIN(v.activationdate) AS activationdate
+INTO #ResultSPD
+FROM RiskDB.dbo.vwLoanSnapshots AS v
+LEFT JOIN #SPD AS s ON s.AccountId = v.AccountId
+GROUP BY v.AccountId;
+
+
+
+
+	SELECT 
+    AccountId,
+    MAX(CASE WHEN st.DaysDiff IN(0,1)   AND   st.OverdueDays >= 1 THEN  st.CalculationDate END) AS  SPD1,
+    MAX(CASE WHEN st.DaysDiff IN(6,7)   AND   st.OverdueDays >= 7 THEN  st.CalculationDate  END) AS SPD7,
+    MAX(CASE WHEN st.DaysDiff IN(14,15)  AND st.OverdueDays  >= 15 THEN st.CalculationDate  END) AS SPD15,
+    MAX(CASE WHEN st.DaysDiff IN(29,30)  AND st.OverdueDays  >= 30 THEN st.CalculationDate  END) AS SPD30,
+    MAX(CASE WHEN st.DaysDiff IN(89,90)  AND st.OverdueDays  >= 90 THEN st.CalculationDate  END) AS SPD90
+	INTO #SPDfinal
+FROM     (    SELECT  
+        v2.AccountId,
+        DATEDIFF(DAY,spd.SecondPaymentDate , v2.CalculationDate) AS DaysDiff,
+        v2.CalculationDate AS CalculationDate,
+        v2.OverdueDays
+    FROM       RiskDB.dbo.vwLoanSnapshots AS v2 
+			   INNER JOIN #ResultSPD AS spd ON spd.AccountId = v2.AccountId 
+			   AND (DATEDIFF(DAY, spd.SecondPaymentDate, v2.CalculationDate) IN (0,1,6,7,14,15,29,30,89,90))    ) AS st
+GROUP BY AccountId
+
+
+
+
+TRUNCATE TABLE RiskDB.calc.SPD_ICL
+INSERT INTO    RiskDB.calc.SPD_ICL
+--сюда за 
+-- Retrieve the final result by joining with ICL_Apps and temp tables
+	SELECT 
+		[LoanID] = a.ID_D,
+		[PINFL] = a.in_form_pers_id,
+		[New/Repeated Client] = a.[6m_status],
+		[Segment] = a.fn_high_segment,		
+		[Antifraud_score] = r.fn_anti_fraud_score,
+		[TMX_score] = r.in_tmx_policy_score,
+		[Is Active] = CASE WHEN s.AccountId IS NULL THEN 0 ELSE 1 END ,
+		[Issue_Date] = CAST(COALESCE(f.ActivationDate,a.fn_today) AS DATE),
+		[ClosedDate] = CAST(f.MaxCloseddate AS DATE),
+		[ICL/POS] = 'ICL',
+		[SubProduct] = a.Product_Subtype,
+		[Add_Loan] = CAST(a.fn_tbc_add_loan_indicator AS INT),
+		[Application_amount] = a.in_form_appl_amnt,
+		[Offered_Amount] = a.fn_final_offered_amnt,
+		[Disbursed_Amount] = a.Disbursed_Amount,
+		[First_Payment_Date] = CAST(f.SecondPaymentDate AS DATE),
+		--[Last_Repayment_Date] =cast(l.Last_Repayment_Date as date),
+		[Current_Overdue_Days] = CASE WHEN s.OverdueDays IS NULL THEN 0 ELSE s.OverdueDays END ,
+		[Max_Overdue_Days] = f.MaxOverdue,
+		[Matured for SPD1]=  CASE WHEN f.MaxCloseddate >= F.SecondPaymentDate THEN 1 WHEN f.MaxCloseddate < F.secondPaymentDate THEN 0 WHEN	CAST(GETDATE() AS DATE) > F.SecondPaymentDate THEN 1 ELSE 0 END ,
+		[Matured for SPD7] = CASE WHEN f.MaxCloseddate >= DATEADD(DAY ,6,  f.SecondPaymentDate)  THEN 1 WHEN f.MaxCloseddate < DATEADD(DAY ,6,  f.SecondPaymentDate) THEN 0 WHEN	CAST(GETDATE() AS DATE) > DATEADD(DAY ,6,  f.SecondPaymentDate) THEN 1 ELSE 0 END  ,
+		[Matured for SPD15]= CASE WHEN f.MaxCloseddate >= DATEADD(DAY, 14, f.SecondPaymentDate)  THEN 1 WHEN f.MaxCloseddate < DATEADD(DAY, 14, f.SecondPaymentDate) THEN 0 WHEN	CAST(GETDATE() AS DATE) > DATEADD(DAY, 14, f.SecondPaymentDate) THEN 1 ELSE 0 END ,
+		[Matured for SPD30]= CASE WHEN f.MaxCloseddate >= DATEADD(DAY, 29, f.SecondPaymentDate)  THEN 1 WHEN f.MaxCloseddate < DATEADD(DAY, 29, f.SecondPaymentDate) THEN 0 WHEN	CAST(GETDATE() AS DATE) > DATEADD(DAY, 29, f.SecondPaymentDate) THEN 1 ELSE 0 END ,
+		[Matured for SPD90]= CASE WHEN f.MaxCloseddate >= DATEADD(DAY, 89, f.SecondPaymentDate)  THEN 1 WHEN f.MaxCloseddate < DATEADD(DAY, 89, f.SecondPaymentDate) THEN 0 WHEN	CAST(GETDATE() AS DATE) > DATEADD(DAY, 89, f.SecondPaymentDate) THEN 1 ELSE 0 END ,
+		[SPD1]  = CASE WHEN COALESCE(spd.SPD1,spd.SPD7,spd.SPD15,spd.SPD30,spd.SPD90) IS NOT NULL THEN 1 ELSE 0 END ,
+        [SPD7]  = CASE WHEN COALESCE(spd.SPD7,spd.SPD15,spd.SPD30,spd.SPD90) IS NOT NULL THEN 1 ELSE 0 END,
+        [SPD15] = CASE WHEN COALESCE(spd.SPD15,spd.SPD30,spd.SPD90)IS NOT NULL THEN 1 ELSE 0 END,
+        [SPD30] = CASE WHEN COALESCE(spd.SPD30,spd.SPD90)IS NOT NULL THEN 1 ELSE 0 END,
+        [SPD90] = CASE WHEN spd.SPD90  IS NOT NULL THEN 1 ELSE 0 END,
+        [SPD1 Date] = CASE WHEN spd.SPD1 IS NOT NULL THEN  DATEADD(DAY,1,CAST(f.SecondPaymentDate AS DATE)) END,    
+        [SPD7 Date] =  CASE WHEN spd.SPD7 IS NOT NULL THEN  DATEADD(DAY,7,CAST(f.SecondPaymentDate AS DATE)) END,
+        [SPD15 Date] = CASE WHEN spd.SPD15 IS NOT NULL THEN  DATEADD(DAY,15,CAST(f.SecondPaymentDate AS DATE)) END,
+        [SPD30 Date] = CASE WHEN spd.SPD30 IS NOT NULL THEN  DATEADD(DAY,30,CAST(f.SecondPaymentDate AS DATE)) END,
+        [SPD90 Date] = CASE WHEN spd.SPD90 IS NOT NULL THEN  DATEADD(DAY,90,CAST(f.SecondPaymentDate AS DATE)) END,
+		[App_time]= a.date_start,
+		a.Merchant
+	FROM riskdb.[dbo].[ICL_Apps] AS a WITH(NOLOCK) 
+		LEFT JOIN #Snaps AS s ON s.accountid = a.ID_D
+		LEFT JOIN #ResultSPD AS f ON f.AccountId = a.ID_D
+		LEFT JOIN #SPDfinal AS spd ON spd.AccountId = a.ID_D
+		LEFT JOIN  (SELECT 
+						CONCAT(CASE WHEN r.in_baas_application = 1 AND p.IABS_loan_id IS NOT NULL THEN  p.IABS_loan_id
+						WHEN r.in_baas_application = 1 AND p.IABS_loan_id IS NULL THEN r.appl_id
+						WHEN r.in_baas_application = 0 OR r.in_baas_application IS NULL THEN r.appl_id ELSE NULL END, r.in_form_pers_id) AS corr_id,
+						r.fn_anti_fraud_score,
+						r.in_tmx_policy_score
+						FROM db.wings.score_icl AS r WITH(NOLOCK)
+		LEFT JOIN	DB.dbo.v_risk_PaymeLoanApplications AS p WITH(NOLOCK) ON r.appl_id = p.wings_applid ) AS r
+		ON a.ID_Pers = r.corr_id
+	
+
+
+WHERE a.Disbursed = '1' 
+    
+	
+END;
+GO
+
+
