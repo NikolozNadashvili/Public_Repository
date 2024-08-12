@@ -1,0 +1,105 @@
+USE [RiskDB]
+GO
+
+
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+ALTER PROCEDURE [dbo].[Calc_Primal_IDs] 
+AS
+BEGIN
+
+
+
+
+-- =============================================
+-- Procedure: Riskdb.calc.Primal_IDs
+-- Created By: Nikoloz Nadashvili
+-- Created Date: 2024/07/12
+-- Last Script Update Date:  2024/07/12
+-- AVG run time : 3 min
+/*
+ Description: 
+
+ This procedure creates table which identify the first loan in the additional loans line. 
+ For example, if a client takes a new loan and then 10 additional loans, we want to find their first new loan in the line.
+ */
+-- =============================================
+ DROP TABLE IF EXISTS #Loans, #Ancestors, #prefinal;
+
+    SELECT 
+        AccountId,
+        MAX(CAST(NULLIF(LTRIM(RTRIM(REPLACE(OriginalAccountId, '""', ''))), '') AS INT)) AS OriginalAccountId
+ INTO #Loans
+    FROM db.calc.LoanSnapshotsMerged (NOLOCK)
+    WHERE ActivationDate IS NOT NULL
+		  AND ISNULL(OriginalAccountId, '') != ''
+    GROUP BY AccountId;
+
+    ;WITH l AS 
+		(
+        SELECT 
+            OriginalAccountId AS ParentLoan, 
+            OriginalAccountId, 
+            AccountId, 
+            1 AS LoanLevel
+        FROM #Loans
+        UNION ALL
+        SELECT 
+            ll.OriginalAccountId AS ParentLoan, 
+            l.OriginalAccountId, 
+            l.AccountId, 
+            l.LoanLevel + 1
+        FROM l
+        INNER JOIN #Loans ll ON ll.AccountId = l.ParentLoan AND ll.OriginalAccountId <> l.OriginalAccountId
+	   )
+
+    SELECT 
+        AccountId, 
+        l.OriginalAccountId AS Prev_loan, 
+        ParentLoan, 
+        LoanLevel
+ INTO #Ancestors
+    FROM l
+    OPTION (MAXRECURSION 32654);
+
+
+    DROP TABLE IF EXISTS #FirstAncestors;
+    SELECT 
+        a.*
+    INTO #prefinal
+    FROM #Ancestors a
+    INNER JOIN (
+        SELECT 
+            AccountId, 
+            MAX(LoanLevel) AS MxL
+        FROM #Ancestors
+        GROUP BY AccountId
+    ) aa ON a.AccountId = aa.AccountId AND a.LoanLevel = aa.MxL;
+
+
+
+    TRUNCATE TABLE Riskdb.calc.Primal_IDs;
+
+    INSERT INTO Riskdb.calc.Primal_IDs (loanid, Prev_loan, ParentLoan, LoanLevel)
+    SELECT 
+        a.AccountId AS loanid,
+        COALESCE(p.Prev_loan, a.AccountId) AS Prev_loan,
+        COALESCE(p.ParentLoan, a.AccountId) AS ParentLoan,
+        COALESCE(p.LoanLevel, 0) AS LoanLevel
+    FROM db.calc.LoanSnapshotsMerged AS a WITH (NOLOCK)
+    LEFT JOIN #prefinal AS p ON a.AccountId = p.AccountId;
+
+END
+
+
+GO
+
+
