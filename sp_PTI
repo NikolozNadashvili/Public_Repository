@@ -1,0 +1,173 @@
+USE [RiskDB]
+GO
+
+/****** Object:  StoredProcedure [dbo].[sp_PTI]    Script Date: 8/12/2024 5:56:15 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+
+
+
+
+ALTER PROCEDURE   [dbo].[sp_PTI]
+AS
+BEGIN
+
+
+
+
+-- =============================================
+-- Procedure: Riskdb.dbo.sp_PTI
+-- Created By: Nikoloz Nadashvili
+-- Created Date: 2024/07/20
+-- Last Script Update Date:  2024/07/20
+-- AVG run time : 5 min
+/*
+ Description: 
+
+ This procedure creates table with PTI of clients
+ We using this tables in PBI reports 
+ */
+-- =============================================
+    DECLARE @last_CalculationDate AS DATE
+    DECLARE @today  AS DATE = CAST(GETDATE() AS DATE)
+
+    SET @last_CalculationDate = (
+        SELECT MAX(v2.CalculationDate)
+        FROM riskdb.PBI.PTI_portfolio AS v2
+    )
+
+    SET @last_CalculationDate =  DATEADD(DAY, -3, @last_CalculationDate)
+
+
+
+
+
+    DROP TABLE IF EXISTS #PTI, #wof;	
+
+    -- Create temporary table #wof with distinct loan_ids and minimum oper_day
+    SELECT DISTINCT 
+        wof.loan_id,
+        MIN(wof.oper_day) AS oper_day
+    INTO #wof
+    FROM DB.uzdwh.write_off_loans AS wof WITH (NOLOCK)
+    GROUP BY wof.loan_id;
+
+    -- Create temporary table #PTI with necessary data
+    SELECT
+        a.ID_Pers,
+        a.ID_A,
+        a.ID_D,
+        a.fn_today,
+        WOF_Status = CASE WHEN a.wof_date IS NULL THEN 0 ELSE 1 END,
+        a.[6m_status],
+        a.fn_high_segment,
+        [Add Loan] = COALESCE(a.fn_tbc_add_loan_indicator, 0),
+        r.Salary,
+        r.PMT_katm,
+        a.Test_Group,
+        [July_24] = CASE WHEN a.fn_today >= '20240701' THEN 1 ELSE 0 END
+    INTO #PTI
+    FROM RiskDB.dbo.ICL_Apps AS a WITH (NOLOCK)
+    LEFT JOIN (
+        SELECT 
+            IDandPers = CONCAT(
+                CASE 
+                    WHEN r.in_baas_application = 1 AND p.IABS_loan_id IS NOT NULL THEN p.IABS_loan_id
+                    WHEN r.in_baas_application = 1 AND p.IABS_loan_id IS NULL THEN r.appl_id
+                    WHEN r.in_baas_application = 0 OR r.in_baas_application IS NULL THEN r.appl_id
+                    ELSE NULL 
+                END, 
+                r.in_form_pers_id
+            ),
+          Salary = COALESCE(
+			NULLIF(ABS(r.fn_income_calculated), 0),
+                NULLIF(ABS(r.fn_tax_salary_1), 0), NULLIF(ABS(r.fn_tax_salary_2), 0),
+                NULLIF(ABS(r.fn_inps_salary_1), 0), NULLIF(ABS(r.fn_inps_salary_2), 0),
+                NULLIF(ABS(r.fn_trans_salary_1), 0), NULLIF(ABS(r.fn_katm_salary), 0)
+            ),
+
+
+            [PMT_katm] = COALESCE(r.fn_katm_total_pmt,0)
+        FROM db.wings.score_icl AS r WITH (NOLOCK)
+        LEFT JOIN DB.dbo.v_risk_PaymeLoanApplications AS p WITH (NOLOCK) ON r.appl_id = p.wings_applid
+    ) AS r ON a.ID_Pers = r.IDandPers;
+
+    DELETE FROM riskdb.PBI.PTI_portfolio
+    WHERE CalculationDate >= @last_CalculationDate;
+
+    INSERT INTO riskdb.PBI.PTI_Portfolio
+    SELECT 
+        v2.CalculationDate,
+        SUM(v2.Amount / 100) AS Total_Amount,
+        CASE WHEN wof.oper_day > v2.CalculationDate OR wof.oper_day IS NULL THEN 0 ELSE 1 END AS WOF_Status,
+        [6m_status] = COALESCE(a.[6m_status], 'Not Identified'),
+        [fn_high_segment] = COALESCE(a.fn_high_segment, 'Not Identified'),
+        [Add Loan] = COALESCE(CAST(a.[Add Loan] AS VARCHAR(1)), 'Not Identified'),
+        [Ratio > 60%] = CASE 
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 60 THEN '1' 
+            ELSE '0' 
+        END,
+        [Test_Group] = COALESCE(a.Test_Group, 'Not Identified'),
+        [July_24] = COALESCE(CAST(a.July_24 AS VARCHAR(1)), 'Not Identified'),
+        EndOfMonth = EOMONTH(v2.CalculationDate),
+        [Ranges] = CASE 
+            WHEN COALESCE(a.Salary, 0) = 0 THEN 'Without Income'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 100 THEN '>100%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 80 THEN '>80% <= 100%' 
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 60 THEN '>60% <= 80%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 50 THEN '>50% <= 60%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 40 THEN '>40% <= 50%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 30 THEN '>30% <= 40%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 20 THEN '>20% <= 30%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 10 THEN '>10% <= 20%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 <= 10 THEN '<=10%'
+            ELSE 'Not Identified' 
+        END,
+        COUNT(*) AS Count_Records
+    FROM RiskDB.dbo.vwLoanSnapshots AS v2 WITH (NOLOCK)
+    LEFT JOIN #PTI AS a ON a.ID_D = v2.AccountId
+    LEFT JOIN #wof AS wof ON wof.loan_id = v2.AccountId
+    LEFT JOIN Riskdb.dbo.White_List AS wl WITH (NOLOCK) ON CAST(v2.AccountId AS NVARCHAR(50)) = wl.AccountId
+    LEFT JOIN db.uzdwh.max_loan_payment AS lp WITH (NOLOCK) ON lp.loan_id = v2.AccountId
+    WHERE 
+        v2.CalculationDate >= @last_CalculationDate AND v2.CalculationDate < @today
+        AND v2.Snap_Type = '1' 
+        AND (v2.PrincipalBalance+v2.InterestBalance+v2.PenaltyBalance+COALESCE(v2.FeesDue,0)) > 0
+        AND wl.AccountId IS NULL
+    GROUP BY 
+        v2.CalculationDate,
+        CASE WHEN wof.oper_day > v2.CalculationDate OR wof.oper_day IS NULL THEN 0 ELSE 1 END,
+        COALESCE(a.[6m_status], 'Not Identified'),
+        COALESCE(a.fn_high_segment, 'Not Identified'),
+        COALESCE(CAST(a.[Add Loan] AS VARCHAR(1)), 'Not Identified'),
+        CASE 
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 60 THEN '1' 
+            ELSE '0' 
+        END,
+        COALESCE(a.Test_Group, 'Not Identified'),
+        COALESCE(CAST(a.July_24 AS VARCHAR(1)), 'Not Identified'),
+        EOMONTH(v2.CalculationDate),
+         CASE 
+            WHEN COALESCE(a.Salary, 0) = 0 THEN 'Without Income'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 100 THEN '>100%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 80 THEN '>80% <= 100%' 
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 60 THEN '>60% <= 80%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 50 THEN '>50% <= 60%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 40 THEN '>40% <= 50%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 30 THEN '>30% <= 40%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 20 THEN '>20% <= 30%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 > 10 THEN '>10% <= 20%'
+            WHEN (a.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(a.Salary, 0) * 100 <= 10 THEN '<=10%'
+            ELSE 'Not Identified' 
+        END;
+END;
+GO
+
+
