@@ -1,0 +1,1282 @@
+USE [RiskDB]
+GO
+
+/****** Object:  StoredProcedure [dbo].[RB_Risk_Report_ICL_Daily]    Script Date: 8/12/2024 5:59:12 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ALTER  PROCEDURE	
+--exec 
+[dbo].[RB_Risk_Report_ICL_Daily]
+AS
+BEGIN
+
+-- =============================================
+-- Procedure: Riskdb.dbo.RB_Risk_Report_ICL_Daily
+-- Created By: Nikoloz Nadashvili
+-- Created Date: 2023/12/14 
+-- Last Script Update Date: 2024/02/26
+-- Description: Эта процедура создана что бы создавать таблицы,которые привязанны к билдеру для дневного репорта Risk Report ICL Daily
+-- процедура работает в среднем за 5-7 минут,она стоит на автоматическом обновлении утром приблезительно к 6 утра
+-- скрипт сам удаляет таблицы и создает новые каждый день,что бы следующий день запись данные.
+-- так же он привязан к таблице которая тоже стоит на джобе процедуры,которая создает таблицу
+-- Из репорт билдера на почту отправляется получателям группы ICL_Risk_Metrics_Digest в 9:00 по Грузинскому времени
+-- =============================================
+
+
+DROP TABLE IF EXISTS
+#Overall1
+,#Overall2
+,#NewLoanDisb
+,#NewLoanApps
+,#Portfolio_PreCalculation
+,#Portfolio_PreCalculationForNewLoans
+,#Portfolio_PreCalculationForRepLoans
+,#Portfolio_PreCalculationForaddLoans
+,#RepLoanDisb
+,#RepLoanApps
+,#FinalOverAllLoans
+,#FinalNewLoans
+,#FinalRepLoans
+,#Loans
+,#Unique_loans_PerDay
+,#Unique_loans_PerDay_For_New
+,#Unique_loans_PerDay_For_Rep
+,#NewICLidForPortf
+,#FSPD
+,#Last10Days
+,#Unique_loans_PerDay_For_New_add
+,#NewLoanDisb_add
+,#NewLoanApps_add
+,#NewLoanApps_add
+,#FinalNewLoans_add
+,#FinalRepLoans_add
+,#RepLoanDisb_add
+,#Unique_loans_PerDay_For_Rep_add
+,#RepLoanApps_add
+,#Portfolio_PreCalculationForNewLoans_add
+,#Portfolio_PreCalculationForRepLoans_add
+,#FinalFPDRep_add
+,#FinalFPDRep
+,#FinalFPDNew_add
+,#FinalFPDNew
+,#FinalNewNewLoans
+,#NewNewLoanApps
+,#NewNewLoanDisb
+,#Unique_loans_PerDay_For_New_New
+,#Portfolio_PreCalculationForNewNewLoans
+,#FinalFPDNewNew
+,#FinalFPD7NewNew
+,#FinalFPD7New
+,#FinalFPD7New_add
+,#FinalFPD7Rep
+,#FinalFPD7Rep_add
+,#LitigBalance  
+,#base
+,#base1
+,#Unique_apps_PerDay
+,#wof
+
+
+
+
+DECLARE @l10d DATE; 
+SET @l10d = DATEADD(DAY, -10, CAST(GETDATE() AS DATE));
+
+
+
+
+SELECT DISTINCT wof.loan_id,
+       MIN(wof.oper_day) AS oper_day
+INTO #wof
+FROM DB.uzdwh.write_off_loans AS wof WITH(NOLOCK)
+GROUP BY wof.loan_id
+
+
+
+
+
+SELECT ls.accountid,
+		MIN(ActivationDate) ActivationDate,
+		MIN(CASE WHEN ISNULL(z.AddLoan,0) = 1 THEN z.amount ELSE ls.amount*1.0/100 END ) amount
+			INTO #base
+			FROM RiskDB.dbo.vwLoanSnapshots AS  ls  (NOLOCK)
+			LEFT JOIN db.[dbo].[v_LoanDisbursement_NET]  z ON z.LoanId =ls.AccountId
+			WHERE ls.Snap_Type=1
+		 	GROUP BY ls.accountid
+
+
+
+SELECT
+			FORMAT(ls.activationdate,'yyyy-MM-dd') disbursed_date,
+			MAX(ls.AccountId)  loan_id,
+			SUM(amount) amount
+			INTO #base1
+			FROM #base ls
+			INNER  JOIN Riskdb.dbo.ICL_Apps AS  c WITH(NOLOCK) ON c.ID_D =ls.AccountId
+			GROUP BY c.in_form_pers_id, FORMAT(ls.activationdate,'yyyy-MM-dd')
+
+
+SELECT *
+INTO   #Unique_apps_PerDay
+FROM (
+SELECT 
+    [fn_today]  = FORMAT(s.fn_today,'yyyy-MM-dd') ,
+	[Pers]= s.in_form_pers_id,
+    [appl_id] = s.ID_a,
+	[fn_final_result]= s.fn_final_result,
+	ROW_NUMBER() OVER (PARTITION BY s.in_form_pers_id, s.fn_today ORDER BY fn_final_result DESC, s.Disbursed DESC,	s.ID_a DESC)   AS rn
+	 
+FROM [RiskDB].[dbo].[ICL_Apps] AS  s  WITH(NOLOCK)
+WHERE s.fn_today >= @l10d ) AS a 
+ WHERE a.rn =1
+  
+  
+  select * 
+  into #LitigBalance 
+  From(  SELECT distinct    lit.loan_id,
+                        lit.load_date,
+                        dt.LIT_date AS Lit_date,
+                        SUM(COALESCE(lit.litigation_balance, 0)) AS Lit_amount
+
+             FROM       DB.uzdwh.loan_snapshots_v2 AS  lit  
+             LEFT JOIN  RIskdb.dbo.litigations AS dt      WITH(NOLOCK)       ON         dt.loan_id = lit.loan_id
+
+             WHERE      lit.contract_date IS NOT NULL 
+						AND (COALESCE(lit.litigation_balance, 0) + COALESCE(lit.litigation_percent_balance, 0) > 0 OR COALESCE(lit.written_off_balance,0) > 0)
+			                         AND lit.load_date >= @l10d 
+						GROUP BY   lit.loan_id, lit.load_date, dt.LIT_date) as a 
+
+
+
+
+ --Тут мы создаем таблицу выдач,где будут едд лоаны и только выданные кредиты
+ SELECT DISTINCT lsv.AccountId [loan_id],
+b1.amount AS [contract_sum_nom],
+lsv.ActivationDate AS  [contract_date],
+a.fn_tbc_add_loan_indicator AS [is_add_loan],
+lsv.ClosedDate
+INTO   #Loans
+FROM  RiskDB.dbo.vwLoanSnapshots AS lsv  
+INNER JOIN RiskDB.[dbo].[ICL_Apps] AS a WITH(NOLOCK)  ON a.ID_D = lsv.AccountId
+INNER JOIN #Unique_apps_PerDay AS b  ON b.appl_id = lsv.AccountId
+LEFT JOIN #base1 AS b1 ON b1.loan_id = b.appl_id
+WHERE lsv.Snap_Type = '1'
+
+
+
+
+
+-----------------#############-----Application Block-----############-------------------------------------------
+
+---------------------------***************	Overall	Шаг 1		**************-----------------------------------
+--Находим кол-во апликаций
+
+SELECT DISTINCT
+    [Period_in_Days]  = CAST(s.fn_today AS DATE) ,
+    [App_Numbers_Qty] = COUNT(s.ID_A),
+	[Approval_rate_Percent] =  COUNT(CASE WHEN  s.fn_final_result = 1 THEN s.ID_A ELSE NULL END)*1.0 / COUNT(s.ID_A)
+INTO  #Overall1
+FROM RiskDB.[dbo].[ICL_Apps] AS  s   WITH(NOLOCK)
+INNER JOIN #Unique_apps_PerDay AS pr ON pr.appl_id = s.ID_A
+WHERE s.fn_today >= @l10d
+ AND s.fn_today >= '2021-01-01' 
+GROUP BY s.fn_today;
+
+---------------------------***************	Overall	Шаг 2		**************-----------------------------------
+--Выдачи в разрезе дня что бы избежать умножения если человек сделал несколько кредитов за день
+
+SELECT
+FORMAT(s.contract_date,'yyyy-MM-dd') AS [Calc_Date],
+w.in_form_pers_id,
+MAX(s.loan_id) loan_id,
+MAX(s.contract_sum_nom) AS amount,
+MAX(w.fn_final_offered_amnt) AS fn_final_offered_amnt
+
+INTO   #Unique_loans_PerDay
+FROM  #loans AS s
+INNER JOIN [RiskDB].[dbo].[ICL_Apps] AS w with(nolock)  ON w.ID_D = s.loan_id
+GROUP BY FORMAT(s.contract_date,'yyyy-MM-dd')
+, w.in_form_pers_id
+
+--Находим кол-во выдач
+SELECT u.Calc_Date AS  [Period_in_Days]  ,
+SUM(u.amount)/1000000 AS  [Disb_amount_M_UZS],
+COUNT(u.loan_id) AS [Disb_numbers_Qty],
+AVG(u.amount)/1000000 AS [Avg_ticket_size_UZS],
+[Utilization_Percent] =     COALESCE((SUM(u.amount) / NULLIF(SUM(u.fn_final_offered_amnt), 0)),0)
+INTO   #Overall2
+FROM #Unique_loans_PerDay AS u
+WHERE CAST(u.Calc_Date AS DATE) >= @l10d
+GROUP BY u.[Calc_Date]
+
+
+--Обьяденяем наш результат по Оверолл
+SELECT o1.*,
+   [Net_Take_up_Percent] = o2.Disb_numbers_Qty*1.0  / NULLIF(o1.App_Numbers_Qty, 0),
+   [Take_up_Percent_Qty] = o2.Disb_numbers_Qty*1.0  / NULLIF(o1.App_Numbers_Qty * NULLIF(o1.[Approval_rate_Percent], 0),0),
+ [Utilization_Percent] = o2.[Utilization_Percent],
+   o2.Disb_numbers_Qty,
+   o2.Disb_amount_M_UZS,
+ [Avg_ticket_size_UZS] = o2.[Avg_ticket_size_UZS]
+ INTO #FinalOverAllLoans
+FROM #Overall1 AS o1
+LEFT JOIN #Overall2 AS o2 ON o1.[Period_in_Days] = o2.[Period_in_Days]
+
+
+
+
+
+
+-----------------------***************New Client New Loan(абсолютно новые клиенты) 	**************-------------------
+--Выдачи в разрезе дня что бы избежать умножения если человек сделал несколько кредитов за день
+select
+FORMAT(s.contract_date,'yyyy-MM-dd') AS [Calc_Date],
+w.in_form_pers_id,
+MAX(s.loan_id) loan_id,
+MAX(s.contract_sum_nom) AS amount,
+MAX(w.fn_final_offered_amnt) AS fn_final_offered_amnt
+INTO   #Unique_loans_PerDay_For_New_New
+FROM  #loans AS s
+inner join [RiskDB].[dbo].[ICL_Apps] AS w with(nolock) ON w.ID_D = s.loan_id
+WHERE w.[6m_status]='NEW' 
+GROUP BY FORMAT(s.contract_date,'yyyy-MM-dd')
+, w.in_form_pers_id
+
+
+--	Здесь мы находим выдачи кредитов
+SELECT u.Calc_Date AS  Period_in_Days  ,
+SUM(u.amount)/1000000 AS  [Disb_amount_M_UZS],
+COUNT(u.loan_id) AS [Disb_numbers_Qty],
+AVG(u.amount)/1000000 AS [Avg_ticket_size_UZS],
+[Utilization_Percent] =     COALESCE((SUM(u.Amount) / NULLIF(SUM(u.fn_final_offered_amnt), 0)),0)
+ INTO #NewNewLoanDisb
+FROM #Unique_loans_PerDay_For_New_New AS u
+WHERE CAST(u.Calc_Date AS DATE) >= @l10d
+GROUP BY u.[Calc_Date]
+
+
+--  Здесь мы находим апликации
+ SELECT
+    [Period_in_Days]  = CAST(s.fn_today AS DATE) ,
+    [App_Numbers_Qty] = COUNT(s.ID_A),
+	[Approved] = COUNT(CASE WHEN s.fn_final_result = 1 THEN s.ID_A ELSE NULL END),
+	[Approval_rate_Percent] =  COUNT(CASE WHEN  s.fn_final_result = 1 THEN s.ID_A ELSE NULL END)*1.0 / COUNT(s.ID_A)
+	INTO  #NewNewLoanApps
+FROM [RiskDB].[dbo].[ICL_Apps] AS s  with(nolock)
+inner join #Unique_apps_PerDay as pr on pr.appl_id = s.ID_A
+WHERE s.fn_today >= @l10d AND s.[6m_status] ='NEW'  
+GROUP BY s.fn_today
+
+
+--  Обединяем и находим конечный результат 
+SELECT na.[Period_in_Days],
+       na.App_Numbers_Qty,
+       na.[Approval_rate_Percent],
+       [Net_Take_up_Percent] = nd.Disb_numbers_Qty*1.0  / NULLIF(na.App_Numbers_Qty, 0),
+       [Take_up_Percent_Qty] = nd.Disb_numbers_Qty*1.0  / NULLIF(na.App_Numbers_Qty * NULLIF(na.[Approval_rate_Percent], 0),0),
+	   [Utilization_Percent] = nd.[Utilization_Percent],
+       nd.Disb_numbers_Qty,
+       nd.Disb_amount_M_UZS,
+	   [Avg_ticket_size_UZS] = nd.[Avg_ticket_size_UZS]
+	 INTO #FinalNewNewLoans
+FROM #NewNewLoanApps AS na
+LEFT JOIN #NewNewLoanDisb AS nd ON nd.Period_in_Days = na.Period_in_Days
+
+
+-----------------------***************<6 New Loan (Клиенты которые с нами меньше 6 месяцев и не едд лоан**************-------------------
+--Выдачи в разрезе дня что бы избежать умножения если человек сделал несколько кредитов за день
+select
+FORMAT(s.contract_date,'yyyy-MM-dd') AS [Calc_Date],
+w.in_form_pers_id,
+MAX(s.loan_id) loan_id,
+MAX(s.contract_sum_nom) AS amount,
+MAX(w.fn_final_offered_amnt) AS fn_final_offered_amnt
+INTO   #Unique_loans_PerDay_For_New
+FROM  #loans AS s
+inner join [RiskDB].[dbo].[ICL_Apps] AS w  WITH(NOLOCK)  on w.ID_D = s.loan_id
+
+WHERE w.[6m_status] ='<=2m' 	AND w.fn_tbc_add_loan_indicator =0 
+GROUP BY FORMAT(s.contract_date,'yyyy-MM-dd') 
+, w.in_form_pers_id
+
+
+
+--Здесь мы находим выдачи кредитов
+SELECT u.Calc_Date AS  Period_in_Days  ,
+SUM(u.amount)/1000000 AS  [Disb_amount_M_UZS],
+COUNT(u.loan_id) AS [Disb_numbers_Qty],
+AVG(u.amount)/1000000 AS [Avg_ticket_size_UZS],
+[Utilization_Percent] =     COALESCE((SUM(u.Amount) / NULLIF(SUM(u.fn_final_offered_amnt), 0)),0)
+ INTO #NewLoanDisb
+FROM #Unique_loans_PerDay_For_New AS u
+WHERE CAST(u.Calc_Date AS DATE) >= @l10d
+GROUP BY u.[Calc_Date]
+
+--Здесь мы находим апликации
+ SELECT
+    [Period_in_Days]  = CAST(s.fn_today AS DATE) ,
+    [App_Numbers_Qty] = COUNT(s.ID_A),
+	[Approved] = COUNT(CASE WHEN s.fn_final_result = 1 THEN s.ID_A ELSE NULL END),
+	[Approval_rate_Percent] =  COUNT(CASE WHEN  s.fn_final_result = 1 THEN s.ID_A ELSE NULL END)*1.0 / COUNT(s.ID_A)
+	INTO  #NewLoanApps
+FROM [RiskDB].[dbo].[ICL_Apps] AS s WITH(NOLOCK)
+
+inner join #Unique_apps_PerDay as pr on pr.appl_id = s.ID_A
+WHERE s.fn_today >= @l10d AND s.[6m_status] ='<=2m'  AND s.fn_tbc_add_loan_indicator =0
+GROUP BY s.fn_today
+
+
+
+--  Обединяем и находим конечный результат 
+SELECT na.[Period_in_Days],
+       na.App_Numbers_Qty,
+       na.[Approval_rate_Percent],
+       [Net_Take_up_Percent] = nd.Disb_numbers_Qty*1.0  / NULLIF(na.App_Numbers_Qty, 0),
+       [Take_up_Percent_Qty] = nd.Disb_numbers_Qty*1.0  / NULLIF(na.App_Numbers_Qty * NULLIF(na.[Approval_rate_Percent], 0),0),
+	   [Utilization_Percent] = nd.[Utilization_Percent],
+       nd.Disb_numbers_Qty,
+       nd.Disb_amount_M_UZS,
+	   [Avg_ticket_size_UZS] = nd.[Avg_ticket_size_UZS]
+	 INTO #FinalNewLoans
+FROM #NewLoanApps AS na
+LEFT JOIN #NewLoanDisb AS nd ON nd.Period_in_Days = na.Period_in_Days
+
+
+
+-----------------------***************<6 Add Loan (Клиенты которые с нами меньше 6 и едд лоан**************-------------------
+
+--Выдачи в разрезе дня что бы избежать умножения если человек сделал несколько кредитов за день
+select
+FORMAT(s.contract_date,'yyyy-MM-dd') AS [Calc_Date],
+w.in_form_pers_id,
+MAX(s.loan_id) loan_id,
+MAX(s.contract_sum_nom) AS amount,
+MAX(w.fn_final_offered_amnt) AS fn_final_offered_amnt
+INTO   #Unique_loans_PerDay_For_New_add
+FROM  #loans AS s
+inner join [RiskDB].[dbo].[ICL_Apps] AS w  WITH(NOLOCK) on w.ID_D = s.loan_id
+WHERE w.[6m_status] ='<=2m' AND w.fn_tbc_add_loan_indicator =1 
+GROUP BY FORMAT(s.contract_date,'yyyy-MM-dd')
+, w.in_form_pers_id
+
+--Здесь мы находим выдачи кредитов
+SELECT u.Calc_Date AS  [Period_in_Days]  ,
+SUM(u.amount)/1000000 AS  [Disb_amount_M_UZS],
+COUNT(u.loan_id) AS [Disb_numbers_Qty],
+AVG(u.amount)/1000000 AS [Avg_ticket_size_UZS],
+[Utilization_Percent] =     COALESCE((SUM(U.Amount) / NULLIF(SUM(u.fn_final_offered_amnt), 0)),0)
+ INTO #NewLoanDisb_add
+FROM #Unique_loans_PerDay_For_New_add AS u
+WHERE CAST(u.Calc_Date AS DATE) >= @l10d
+GROUP BY u.[Calc_Date]
+
+--Здесь мы находим апликации
+ SELECT
+    [Period_in_Days]  = CAST(s.fn_today AS DATE) ,
+    [App_Numbers_Qty] = COUNT(s.ID_A),
+	[Approved] = COUNT(CASE WHEN s.fn_final_result = 1 THEN s.ID_A ELSE NULL END),
+	[Approval_rate_Percent] =  COUNT(CASE WHEN  s.fn_final_result = 1 THEN s.ID_A ELSE NULL END)*1.0 / COUNT(s.ID_A)
+	INTO  #NewLoanApps_add
+FROM [RiskDB].[dbo].[ICL_Apps] AS s  with(nolock)
+
+inner join #Unique_apps_PerDay as pr on pr.appl_id = s.ID_A
+WHERE s.fn_today >= @l10d AND s.[6m_status] ='<=2m' AND s.fn_tbc_add_loan_indicator =1
+GROUP BY s.fn_today
+
+
+--Обединяем и находим конечный результат
+SELECT na.[Period_in_Days],
+       na.App_Numbers_Qty,
+       na.[Approval_rate_Percent],
+       [Net_Take_up_Percent] = nd.Disb_numbers_Qty*1.0  / NULLIF(na.App_Numbers_Qty, 0),
+       [Take_up_Percent_Qty] = nd.Disb_numbers_Qty*1.0  / NULLIF(na.App_Numbers_Qty * NULLIF(na.[Approval_rate_Percent], 0),0),
+	   [Utilization_Percent] = nd.[Utilization_Percent],
+       nd.Disb_numbers_Qty,
+       nd.Disb_amount_M_UZS,
+	   [Avg_ticket_size_UZS] = nd.[Avg_ticket_size_UZS]
+	 INTO #FinalNewLoans_add
+FROM #NewLoanApps_add AS na
+LEFT JOIN #NewLoanDisb_add AS nd ON nd.Period_in_Days = na.Period_in_Days
+
+
+
+
+-----------------------***************>6 New Loan(С нами больше 6 месяцев и не едд лоан)**************-------------------
+--Выдачи в разрезе дня что бы избежать умножения если человек сделал несколько кредитов за день
+select
+FORMAT(s.contract_date,'yyyy-MM-dd') AS [Calc_Date],
+w.in_form_pers_id,
+MAX(s.loan_id) loan_id,
+MAX(s.contract_sum_nom) AS amount,
+MAX(w.fn_final_offered_amnt) AS fn_final_offered_amnt
+INTO   #Unique_loans_PerDay_For_Rep
+FROM  #loans AS s
+inner join [RiskDB].[dbo].[ICL_Apps] AS w  with(nolock) on w.ID_D = s.loan_id
+WHERE w.[6m_status] ='>2m' AND w.fn_tbc_add_loan_indicator =0 
+GROUP BY FORMAT(s.contract_date,'yyyy-MM-dd')
+, w.in_form_pers_id
+
+--Здесь мы находим выдачи
+SELECT u.Calc_Date AS  [Period_in_Days]  ,
+SUM(u.amount)/1000000 AS  [Disb_amount_M_UZS],
+COUNT(u.loan_id) AS [Disb_numbers_Qty],
+AVG(u.amount)/1000000 AS [Avg_ticket_size_UZS],
+[Utilization_Percent] =     COALESCE((SUM(u.amount) / NULLIF(SUM(u.fn_final_offered_amnt), 0)),0)
+ INTO  #RepLoanDisb
+FROM #Unique_loans_PerDay_For_Rep AS u
+WHERE CAST(u.Calc_Date AS DATE) >= @l10d
+GROUP BY u.[Calc_Date]
+
+
+--Step 2 Здесь мы находи апликации
+ SELECT
+    [Period_in_Days]  = CAST(nc.fn_today AS DATE) ,
+    [App_Numbers_Qty] = COUNT(nc.ID_A),
+	[Approved] = COUNT(CASE WHEN nc.fn_final_result = 1 THEN nc.ID_A ELSE NULL END),
+	[Approval_rate_Percent] =  COUNT(CASE WHEN  nc.fn_final_result = 1 THEN nc.ID_A ELSE NULL END)*1.0/ COUNT(nc.ID_A)
+
+	INTO   #RepLoanApps
+FROM [RiskDB].[dbo].[ICL_Apps] AS  nc  with(nolock)
+
+inner join #Unique_apps_PerDay as pr on pr.appl_id = nc.ID_A
+WHERE nc.fn_today >= @l10d AND nc.[6m_status] ='>2m' AND nc.fn_tbc_add_loan_indicator =0
+GROUP BY nc.fn_today
+
+
+--Jбединяем и находим конечный результат
+SELECT na.Period_in_Days,
+       na.App_Numbers_Qty,
+       na.[Approval_rate_Percent],
+       [Net_Take_up_Percent] = nd.Disb_numbers_Qty *1.0 / NULLIF(na.App_Numbers_Qty, 0),
+       [Take_up_Percent_Qty] = nd.Disb_numbers_Qty *1.0 /NULLIF(na.App_Numbers_Qty  * NULLIF(na.[Approval_rate_Percent], 0) , 0),
+	   [Utilization_Percent] = nd.[Utilization_Percent],
+       nd.Disb_numbers_Qty,
+       nd.Disb_amount_M_UZS,
+	   [Avg_ticket_size_UZS] = nd.Avg_ticket_size_UZS
+	   INTO #FinalRepLoans
+FROM #RepLoanApps AS na
+LEFT JOIN #RepLoanDisb AS nd ON nd.Period_in_Days = na.Period_in_Days
+
+
+
+-----------------------***************>6 Add Loan(С нами больше 6 месяцев и едд лоан)**************-------------------
+--Выдачи в разрезе дня что бы избежать умножения если человек сделал несколько кредитов за день
+select
+FORMAT(s.contract_date,'yyyy-MM-dd') AS [Calc_Date],
+w.in_form_pers_id,
+MAX(s.loan_id) loan_id,
+MAX(s.contract_sum_nom) AS amount,
+MAX(w.fn_final_offered_amnt) AS fn_final_offered_amnt
+INTO   #Unique_loans_PerDay_For_Rep_add
+FROM  #loans AS s
+inner join [RiskDB].[dbo].[ICL_Apps] AS w with(nolock)  on w.ID_D = s.loan_id
+WHERE w.[6m_status] ='>2m' AND w.fn_tbc_add_loan_indicator =1 
+GROUP BY FORMAT(s.contract_date,'yyyy-MM-dd')
+, w.in_form_pers_id
+
+
+--Здесь мы находим выдачи
+SELECT u.Calc_Date AS  [Period_in_Days]  ,
+SUM(u.amount)/1000000 AS  [Disb_amount_M_UZS],
+COUNT(u.loan_id) AS [Disb_numbers_Qty],
+AVG(u.amount)/1000000 AS [Avg_ticket_size_UZS],
+[Utilization_Percent] =     COALESCE((SUM(u.amount) / NULLIF(SUM(u.fn_final_offered_amnt), 0)),0)
+
+ INTO  #RepLoanDisb_add
+FROM #Unique_loans_PerDay_For_Rep_add AS u
+WHERE CAST(u.Calc_Date AS DATE) >= @l10d
+GROUP BY u.[Calc_Date]
+
+
+--Здесь мы находи апликации
+ SELECT
+    [Period_in_Days]  = CAST(nc.fn_today AS DATE) ,
+    [App_Numbers_Qty] = COUNT(nc.ID_A),
+	[Approved] = COUNT(CASE WHEN nc.fn_final_result = 1 THEN nc.ID_A ELSE NULL END),
+	[Approval_rate_Percent] =  COUNT(CASE WHEN  nc.fn_final_result = 1 THEN nc.ID_A ELSE NULL END)*1.0
+	/ COUNT(nc.ID_A)
+	INTO   #RepLoanApps_add
+FROM [RiskDB].[dbo].[ICL_Apps] AS  nc  with(nolock)
+
+inner join #Unique_apps_PerDay as pr on pr.appl_id = nc.ID_A
+WHERE nc.fn_today >= @l10d AND nc.[6m_status] ='>2m'AND nc.fn_tbc_add_loan_indicator =1
+GROUP BY nc.fn_today
+
+--Обединяем и находим конечный результат 
+SELECT na.Period_in_Days,
+       na.App_Numbers_Qty,
+       na.[Approval_rate_Percent],
+       [Net_Take_up_Percent] = nd.Disb_numbers_Qty *1.0 / NULLIF(na.App_Numbers_Qty, 0),
+       [Take_up_Percent_Qty] = nd.Disb_numbers_Qty *1.0 /NULLIF(na.App_Numbers_Qty  * NULLIF(na.[Approval_rate_Percent], 0) , 0),
+	   [Utilization_Percent] = nd.[Utilization_Percent],
+       nd.Disb_numbers_Qty,
+       nd.Disb_amount_M_UZS,
+	   [Avg_ticket_size_UZS] = nd.Avg_ticket_size_UZS
+	   INTO #FinalRepLoans_add
+FROM #RepLoanApps_add AS na
+LEFT JOIN #RepLoanDisb_add AS nd ON nd.Period_in_Days = na.Period_in_Days
+
+
+
+
+    --------------------------------------Result Of First Part-------------------------------------------
+   
+   --Сбрасываю старые таблицы,что бы загрузить новые данные 
+   DROP TABLE IF EXISTS 
+		Riskdb.ReportBuilder.ICL_Application_and_Segment_Block
+		
+	
+
+DELETE FROM riskdb.[ReportBuilder].[ICL_Application_and_Segment_Block_full]
+WHERE Period_in_days >= @l10d
+
+    --Тут мы уже достаем результат всех тех таблиц которые загрузили ранее
+	--Все апликации-- Insert Overall
+-- Insert Overall
+
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+cast('ApplicationBlock' as nvarchar(50)) AS [TableType],
+cast('Overall' as nvarchar(50)) as Category
+INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block
+FROM #FinalOverAllLoans as a 
+WHERE Period_in_Days != CAST(GETDATE() AS DATE);
+
+-- Insert NewNewLoans
+
+insert INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+cast('ApplicationBlock' as nvarchar(50)) AS [TableType],
+cast('NewNewLoans' as nvarchar(50)) as Category
+FROM #FinalNewNewLoans as a 
+WHERE Period_in_Days != CAST(GETDATE() AS DATE);
+
+-- Insert NewLoans
+insert INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+cast('ApplicationBlock' as nvarchar(50)) AS [TableType],
+cast('NewLoans' as nvarchar(50)) as Category
+FROM #FinalNewLoans as a
+WHERE Period_in_Days != CAST(GETDATE() AS DATE);
+
+-- Insert NewLoansAdd
+
+insert INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+cast('ApplicationBlock' as nvarchar(50)) AS [TableType],
+cast('NewLoansadd' as nvarchar(50)) as Category
+FROM #FinalNewLoans_add as a
+WHERE Period_in_Days != CAST(GETDATE() AS DATE);
+
+insert INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block
+-- Insert RepLoans
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+cast('ApplicationBlock' as nvarchar(50)) AS [TableType],
+cast('RepLoans' as nvarchar(50)) as Category
+FROM #FinalRepLoans as a
+WHERE Period_in_Days != CAST(GETDATE() AS DATE);
+
+insert INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block
+-- Insert RepLoansAdd
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+cast('ApplicationBlock' as nvarchar(50)) AS [TableType],
+cast('RepLoansadd' as nvarchar(50)) as Category
+FROM #FinalRepLoans_add as a 
+WHERE Period_in_Days != CAST(GETDATE() AS DATE);
+
+
+
+
+------------------------------------------------------------
+
+insert INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block_full
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+cast('ApplicationBlock' as nvarchar(50)) AS [TableType],
+cast('Overall' as nvarchar(50)) as Category
+FROM #FinalOverAllLoans as a 
+WHERE Period_in_Days != CAST(GETDATE() AS DATE);
+
+-- Insert NewNewLoans
+
+insert INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block_full
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+cast('ApplicationBlock' as nvarchar(50)) AS [TableType],
+cast('NewNewLoans' as nvarchar(50)) as Category
+FROM #FinalNewNewLoans as a 
+WHERE Period_in_Days != CAST(GETDATE() AS DATE);
+
+-- Insert NewLoans
+insert INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block_full
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+cast('ApplicationBlock' as nvarchar(50)) AS [TableType],
+cast('NewLoans' as nvarchar(50)) as Category
+FROM #FinalNewLoans as a
+WHERE Period_in_Days != CAST(GETDATE() AS DATE);
+
+-- Insert NewLoansAdd
+
+insert INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block_full
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+cast('ApplicationBlock' as nvarchar(50)) AS [TableType],
+cast('NewLoansadd' as nvarchar(50)) as Category
+FROM #FinalNewLoans_add as a
+WHERE Period_in_Days != CAST(GETDATE() AS DATE);
+
+insert INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block_full
+-- Insert RepLoans
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+cast('ApplicationBlock' as nvarchar(50)) AS [TableType],
+cast('RepLoans' as nvarchar(50)) as Category
+FROM #FinalRepLoans as a
+WHERE Period_in_Days != CAST(GETDATE() AS DATE);
+
+insert INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block_full
+-- Insert RepLoansAdd
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+cast('ApplicationBlock' as nvarchar(50)) AS [TableType],
+cast('RepLoansadd' as nvarchar(50)) as Category
+FROM #FinalRepLoans_add as a 
+WHERE Period_in_Days != CAST(GETDATE() AS DATE);
+
+-----------------------------------------Start of Second Part(Portfolio and PD)-----------------------------------
+--Сбрасываю старые таблицы,что бы загрузить новые данные 
+	 drop table if exists Riskdb.ReportBuilder.ICL_Portfolio_Block
+
+	 
+
+
+
+-- Delete rows from [ReportBuilder].[ICL_Portfolio_Block_full]
+DELETE FROM RiskDB.[ReportBuilder].[ICL_Portfolio_Block_full]
+WHERE [Date] >=  @l10d
+
+---------------------------***************	Overall	**************-----------------------------------
+--Находим портфель и ПД в числах
+	SELECT
+	  v2.CalculationDate [Date],
+	  COUNT(v2.AccountId) AS [Overall portfolio, #] ,
+	  SUM((CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END))/100000000 AS [Overal portfolio, UZS] ,
+	  SUM(CASE WHEN v2.OverdueDays >=1 THEN (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL END )/100000000 [PD ALL UZS],
+	  SUM(CASE WHEN v2.OverdueDays >=30 then  (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL  END)/100000000 [PD 30 UZS],
+	  SUM(CASE WHEN v2.OverdueDays >=90 THEN (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL END)/100000000 [PD 90 UZS]
+
+
+
+  INTO  #Portfolio_PreCalculation
+	FROM 	 RiskDB.dbo.vwLoanSnapshots AS v2   WITH(NOLOCK)
+LEFT JOIN #wof AS wof   ON wof.loan_id = v2.AccountId
+left join #LitigBalance as l on l.loan_id = v2.AccountId  AND v2.CalculationDate =  CASE WHEN DATEPART(WEEKDAY, v2.CalculationDate) = 7 THEN DATEADD(DAY, +1, l.load_date) -- Saturday
+																	  WHEN DATEPART(WEEKDAY, v2.CalculationDate) = 1 THEN DATEADD(DAY, +2, l.load_date) -- Sunday
+																	  ELSE l.load_date END --- this join joins saturday and sunday on monday, bcs there is no data for these days on uz table
+
+	WHERE 	 (v2.CalculationDate>= @l10d)
+	AND	 (wof.oper_day> v2.CalculationDate OR wof.oper_day IS NULL )
+	AND v2.Snap_Type ='1' and
+	coalesce(l.lit_amount,v2.PrincipalBalance) > 0 
+
+
+	GROUP BY 	  v2.CalculationDate
+;
+
+	
+--Находим портфель и ПД в %
+	SELECT
+    portcalc.[Date],
+    [Overall portfolio, #] = portcalc.[Overall portfolio, #],
+    [Overal portfolio, UZS] = portcalc.[Overal portfolio, UZS],
+    [PAR ALL] = portcalc.[PD ALL UZS] 	    / NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculation AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 30] = portcalc.[PD 30 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculation AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 90] = portcalc.[PD 90 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                     FROM #Portfolio_PreCalculation AS a
+                                                     WHERE a.[Date] = portcalc.[Date]), 0),
+													 
+cast('PortfolioBlock' as nvarchar(50)) AS [TableType],
+cast('Overall' as nvarchar(50)) as Category
+INTO Riskdb.ReportBuilder.ICL_Portfolio_Block
+FROM  #Portfolio_PreCalculation AS portcalc
+
+
+INSERT INTO Riskdb.ReportBuilder.ICL_Portfolio_Block_full
+--Находим портфель и ПД в %
+	SELECT
+    portcalc.[Date],
+    [Overall portfolio, #] = portcalc.[Overall portfolio, #],
+    [Overal portfolio, UZS] = portcalc.[Overal portfolio, UZS],
+    [PAR ALL] = portcalc.[PD ALL UZS] 	    / NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculation AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 30] = portcalc.[PD 30 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculation AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 90] = portcalc.[PD 90 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                     FROM #Portfolio_PreCalculation AS a
+                                                     WHERE a.[Date] = portcalc.[Date]), 0),
+													 
+cast('PortfolioBlock' as nvarchar(50)) AS [TableType],
+cast('Overall' as nvarchar(50)) as Category
+
+FROM  #Portfolio_PreCalculation AS portcalc
+	---------------------New Client New Loan(абсолютно новые клиенты)-----------------------------------
+--Находим портфель и ПД в числах
+	SELECT
+	  v2.CalculationDate [Date],
+	  COUNT(v2.AccountId) AS [Overall portfolio, #] ,
+	  SUM((CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END))/100000000 AS [Overal portfolio, UZS] ,
+	  SUM(CASE WHEN v2.OverdueDays >1 THEN (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL END )/100000000 [PD ALL UZS],
+	  SUM(CASE WHEN v2.OverdueDays >=30 then  (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL  END)/100000000 [PD 30 UZS],
+	  SUM(CASE WHEN v2.OverdueDays >=90 THEN (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL END)/100000000 [PD 90 UZS]
+  INTO #Portfolio_PreCalculationForNewNewLoans
+		FROM 	 RiskDB.dbo.vwLoanSnapshots AS v2  
+	inner JOIN 	  [RiskDB].[dbo].[ICL_Apps] AS icl WITH(NOLOCK)  ON icl.ID_D = v2.AccountId
+LEFT JOIN #wof AS wof   ON wof.loan_id = v2.AccountId
+left join #LitigBalance as l on l.loan_id = v2.AccountId  AND v2.CalculationDate =  CASE WHEN DATEPART(WEEKDAY, v2.CalculationDate) = 7 THEN DATEADD(DAY, +1, l.load_date) -- Saturday
+																	  WHEN DATEPART(WEEKDAY, v2.CalculationDate) = 1 THEN DATEADD(DAY, +2, l.load_date) -- Sunday
+																	  ELSE l.load_date END --- this join joins saturday and sunday on monday, bcs there is no data for these days on uz table
+
+	WHERE 	 (v2.CalculationDate>= @l10d)
+		AND (wof.oper_day> v2.CalculationDate OR wof.oper_day IS NULL )AND v2.ActivationDate IS NOT NULL
+		AND coalesce(l.lit_amount,v2.PrincipalBalance) >0 AND icl.[6m_status] ='NEW' 
+	GROUP BY 	  v2.CalculationDate
+
+
+	
+--Находим портфель и ПД в %
+Insert INTO Riskdb.ReportBuilder.ICL_Portfolio_Block
+	SELECT
+    portcalc.[Date],
+    [Overall portfolio, #] = portcalc.[Overall portfolio, #],
+    [Overal portfolio, UZS] = portcalc.[Overal portfolio, UZS],
+    [PAR ALL] = portcalc.[PD ALL UZS] 	    / NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForNewNewLoans AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 30] = portcalc.[PD 30 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForNewNewLoans AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 90] = portcalc.[PD 90 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                     FROM #Portfolio_PreCalculationForNewNewLoans AS a
+                                                     WHERE a.[Date] = portcalc.[Date]), 0),
+													 
+cast('PortfolioBlock' as nvarchar(50)) AS [TableType],
+cast('NewNewLoans' as nvarchar(50)) as Category
+
+	FROM  #Portfolio_PreCalculationForNewNewLoans AS portcalc
+
+
+Insert INTO Riskdb.ReportBuilder.ICL_Portfolio_Block_full
+	SELECT
+    portcalc.[Date],
+    [Overall portfolio, #] = portcalc.[Overall portfolio, #],
+    [Overal portfolio, UZS] = portcalc.[Overal portfolio, UZS],
+    [PAR ALL] = portcalc.[PD ALL UZS] 	    / NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForNewNewLoans AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 30] = portcalc.[PD 30 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForNewNewLoans AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 90] = portcalc.[PD 90 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                     FROM #Portfolio_PreCalculationForNewNewLoans AS a
+                                                     WHERE a.[Date] = portcalc.[Date]), 0),
+													 
+cast('PortfolioBlock' as nvarchar(50)) AS [TableType],
+cast('NewNewLoans' as nvarchar(50)) as Category
+
+	FROM  #Portfolio_PreCalculationForNewNewLoans AS portcalc
+
+---------------------------***************<6 	New Loans 		**************-----------------------------------
+	--Находим портфель и ПД в числах
+	SELECT
+	  v2.CalculationDate [Date],
+	  COUNT(v2.AccountId) AS [Overall portfolio, #] ,
+	  SUM((CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END))/100000000 AS [Overal portfolio, UZS] ,
+	  SUM(CASE WHEN v2.OverdueDays >=1 THEN (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL END )/100000000 [PD ALL UZS],
+	  SUM(CASE WHEN v2.OverdueDays >=30 then  (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL  END)/100000000 [PD 30 UZS],
+	  SUM(CASE WHEN v2.OverdueDays >=90 THEN (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL END)/100000000 [PD 90 UZS]
+
+  INTO   #Portfolio_PreCalculationForNewLoans
+		FROM 	 RiskDB.dbo.vwLoanSnapshots AS v2  WITH(NOLOCK)
+	inner JOIN 	  [RiskDB].[dbo].[ICL_Apps] AS icl WITH(NOLOCK)  ON icl.ID_D = v2.AccountId
+LEFT JOIN #wof AS wof ON wof.loan_id = v2.AccountId
+
+left join #LitigBalance as l on l.loan_id = v2.AccountId AND v2.CalculationDate =  CASE WHEN DATEPART(WEEKDAY, v2.CalculationDate) = 7 THEN DATEADD(DAY, +1, l.load_date) -- Saturday
+																	  WHEN DATEPART(WEEKDAY, v2.CalculationDate) = 1 THEN DATEADD(DAY, +2, l.load_date) -- Sunday
+																	  ELSE l.load_date END --- this join joins saturday and sunday on monday, bcs there is no data for these days on uz table
+
+	WHERE 	 (v2.CalculationDate>= @l10d)
+		AND (wof.oper_day> v2.CalculationDate OR wof.oper_day IS NULL )AND v2.ActivationDate IS NOT NULL
+		AND coalesce(l.lit_amount,v2.PrincipalBalance) >0 AND icl.[6m_status] ='<=2m' AND icl.fn_tbc_add_loan_indicator =0
+	GROUP BY 	  v2.CalculationDate
+
+
+	--Находим портфель и ПД в %
+Insert INTO Riskdb.ReportBuilder.ICL_Portfolio_Block
+	SELECT
+    portcalc.[Date],
+    [Overall portfolio, #] = portcalc.[Overall portfolio, #],
+    [Overal portfolio, UZS] = portcalc.[Overal portfolio, UZS],
+    [PAR ALL] = portcalc.[PD ALL UZS] 	    / NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForNewLoans AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 30] = portcalc.[PD 30 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForNewLoans AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 90] = portcalc.[PD 90 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                     FROM #Portfolio_PreCalculationForNewLoans AS a
+                                                     WHERE a.[Date] = portcalc.[Date]), 0),													 
+cast('PortfolioBlock' as nvarchar(50)) AS [TableType],
+cast('NewLoans' as nvarchar(50)) as Category
+	FROM  #Portfolio_PreCalculationForNewLoans AS portcalc
+
+
+
+
+
+	--Находим портфель и ПД в %
+Insert INTO Riskdb.ReportBuilder.ICL_Portfolio_Block_full
+	SELECT
+    portcalc.[Date],
+    [Overall portfolio, #] = portcalc.[Overall portfolio, #],
+    [Overal portfolio, UZS] = portcalc.[Overal portfolio, UZS],
+    [PAR ALL] = portcalc.[PD ALL UZS] 	    / NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForNewLoans AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 30] = portcalc.[PD 30 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForNewLoans AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 90] = portcalc.[PD 90 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                     FROM #Portfolio_PreCalculationForNewLoans AS a
+                                                     WHERE a.[Date] = portcalc.[Date]), 0),													 
+cast('PortfolioBlock' as nvarchar(50)) AS [TableType],
+cast('NewLoans' as nvarchar(50)) as Category
+	FROM  #Portfolio_PreCalculationForNewLoans AS portcalc
+	---------------------------***************<6 	add Loans 		**************-----------------------------------
+	--Находим портфель и ПД в числах
+	SELECT
+	  v2.CalculationDate [Date],
+	  COUNT(v2.AccountId) AS [Overall portfolio, #] ,
+	  SUM((CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END))/100000000 AS [Overal portfolio, UZS] ,
+	  SUM(CASE WHEN v2.OverdueDays >0 THEN (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL END )/100000000 [PD ALL UZS],
+	  SUM(CASE WHEN v2.OverdueDays >=30 then  (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL  END)/100000000 [PD 30 UZS],
+	  SUM(CASE WHEN v2.OverdueDays >=90 THEN (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL END)/100000000 [PD 90 UZS]
+
+  INTO   #Portfolio_PreCalculationForNewLoans_add
+		FROM 	 RiskDB.dbo.vwLoanSnapshots AS v2  
+	inner JOIN 	  [RiskDB].[dbo].[ICL_Apps] AS icl  with(nolock) ON icl.ID_D = v2.AccountId
+LEFT JOIN #wof AS wof ON wof.loan_id = v2.AccountId
+
+left join #LitigBalance as l on l.loan_id = v2.AccountId  AND v2.CalculationDate =  CASE WHEN DATEPART(WEEKDAY, v2.CalculationDate) = 7 THEN DATEADD(DAY, +1, l.load_date) -- Saturday
+																	  WHEN DATEPART(WEEKDAY, v2.CalculationDate) = 1 THEN DATEADD(DAY, +2, l.load_date) -- Sunday
+																	  ELSE l.load_date END --- this join joins saturday and sunday on monday, bcs there is no data for these days on uz table
+
+	WHERE 	 (v2.CalculationDate>= @l10d)
+		AND (wof.oper_day> v2.CalculationDate OR wof.oper_day IS NULL )AND v2.ActivationDate IS NOT NULL
+		AND coalesce(l.lit_amount,v2.PrincipalBalance)>0 AND icl.[6m_status] ='<=2m' AND icl.fn_tbc_add_loan_indicator =1
+	GROUP BY 	  v2.CalculationDate
+
+
+	--Находим портфель и ПД в %
+	Insert INTO Riskdb.ReportBuilder.ICL_Portfolio_Block
+	SELECT
+    portcalc.[Date],
+    [Overall portfolio, #] = portcalc.[Overall portfolio, #],
+    [Overal portfolio, UZS] = portcalc.[Overal portfolio, UZS],
+    [PAR ALL] = portcalc.[PD ALL UZS] 	    / NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForNewLoans_add AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 30] = portcalc.[PD 30 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForNewLoans_add AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 90] = portcalc.[PD 90 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                     FROM #Portfolio_PreCalculationForNewLoans_add AS a
+                                                     WHERE a.[Date] = portcalc.[Date]), 0),													 
+cast('PortfolioBlock' as nvarchar(50)) AS [TableType],
+cast('NewLoansAdd' as nvarchar(50)) as Category
+	FROM   #Portfolio_PreCalculationForNewLoans_add AS portcalc
+    
+
+
+
+	--Находим портфель и ПД в %
+	Insert INTO Riskdb.ReportBuilder.ICL_Portfolio_Block_full
+	SELECT
+    portcalc.[Date],
+    [Overall portfolio, #] = portcalc.[Overall portfolio, #],
+    [Overal portfolio, UZS] = portcalc.[Overal portfolio, UZS],
+    [PAR ALL] = portcalc.[PD ALL UZS] 	    / NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForNewLoans_add AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 30] = portcalc.[PD 30 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForNewLoans_add AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 90] = portcalc.[PD 90 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                     FROM #Portfolio_PreCalculationForNewLoans_add AS a
+                                                     WHERE a.[Date] = portcalc.[Date]), 0),													 
+cast('PortfolioBlock' as nvarchar(50)) AS [TableType],
+cast('NewLoansAdd' as nvarchar(50)) as Category
+	FROM   #Portfolio_PreCalculationForNewLoans_add AS portcalc
+		---------------------------***************>6 New Loans 		**************-----------------------------------
+--Находим портфель и ПД в числах
+		SELECT
+	  v2.CalculationDate [Date],
+	  COUNT(v2.AccountId) AS [Overall portfolio, #] ,
+	  SUM((CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END))/100000000 AS [Overal portfolio, UZS] ,
+	  SUM(CASE WHEN v2.OverdueDays >0 THEN (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL END )/100000000 [PD ALL UZS],
+	  SUM(CASE WHEN v2.OverdueDays >=30 then  (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL  END)/100000000 [PD 30 UZS],
+	  SUM(CASE WHEN v2.OverdueDays >=90 THEN (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL END)/100000000 [PD 90 UZS]
+  INTO   #Portfolio_PreCalculationForRepLoans
+		FROM 	 RiskDB.dbo.vwLoanSnapshots AS v2
+	inner JOIN 	  [RiskDB].[dbo].[ICL_Apps] AS icl WITH(NOLOCK)  ON icl.ID_D = v2.AccountId
+LEFT JOIN #wof AS wof ON wof.loan_id = v2.AccountId
+
+left join #LitigBalance as l on l.loan_id = v2.AccountId  AND v2.CalculationDate =  CASE WHEN DATEPART(WEEKDAY, v2.CalculationDate) = 7 THEN DATEADD(DAY, +1, l.load_date) -- Saturday
+																	  WHEN DATEPART(WEEKDAY, v2.CalculationDate) = 1 THEN DATEADD(DAY, +2, l.load_date) -- Sunday
+																	  ELSE l.load_date END --- this join joins saturday and sunday on monday, bcs there is no data for these days on uz table
+
+	WHERE 	 (v2.CalculationDate>= @l10d)
+	AND (wof.oper_day> v2.CalculationDate OR wof.oper_day IS NULL )AND v2.ActivationDate IS NOT NULL
+	AND coalesce(l.lit_amount,v2.PrincipalBalance) >0 AND icl.[6m_status] ='>2m' AND icl.fn_tbc_add_loan_indicator =0
+	GROUP BY 	  v2.CalculationDate
+
+
+--Находим портфель и ПД в %
+Insert INTO Riskdb.ReportBuilder.ICL_Portfolio_Block
+	SELECT
+    portcalc.[Date],
+    [Overall portfolio, #] = portcalc.[Overall portfolio, #],
+    [Overal portfolio, UZS] = portcalc.[Overal portfolio, UZS],
+    [PAR ALL] = portcalc.[PD ALL UZS] 	    / NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForRepLoans AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 30] = portcalc.[PD 30 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForRepLoans AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 90] = portcalc.[PD 90 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                     FROM #Portfolio_PreCalculationForRepLoans AS a
+                                                     WHERE a.[Date] = portcalc.[Date]), 0),													 
+cast('PortfolioBlock' as nvarchar(50)) AS [TableType],
+cast('RepLoans' as nvarchar(50)) as Category
+	FROM  #Portfolio_PreCalculationForRepLoans AS portcalc
+
+
+
+--Находим портфель и ПД в %
+Insert INTO Riskdb.ReportBuilder.ICL_Portfolio_Block_full
+	SELECT
+    portcalc.[Date],
+    [Overall portfolio, #] = portcalc.[Overall portfolio, #],
+    [Overal portfolio, UZS] = portcalc.[Overal portfolio, UZS],
+    [PAR ALL] = portcalc.[PD ALL UZS] 	    / NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForRepLoans AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 30] = portcalc.[PD 30 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForRepLoans AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 90] = portcalc.[PD 90 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                     FROM #Portfolio_PreCalculationForRepLoans AS a
+                                                     WHERE a.[Date] = portcalc.[Date]), 0),													 
+cast('PortfolioBlock' as nvarchar(50)) AS [TableType],
+cast('RepLoans' as nvarchar(50)) as Category
+	FROM  #Portfolio_PreCalculationForRepLoans AS portcalc
+		---------------------------***************>6 	add loan	**************-----------------------------------
+--Находим портфель и ПД в числах
+		SELECT
+	  v2.CalculationDate [Date],
+	  COUNT(v2.AccountId) AS [Overall portfolio, #] ,
+	  SUM((CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END))/100000000 AS [Overal portfolio, UZS] ,
+	  SUM(CASE WHEN v2.OverdueDays >0 THEN (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL END )/100000000 [PD ALL UZS],
+	  SUM(CASE WHEN v2.OverdueDays >=30 then  (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL  END)/100000000 [PD 30 UZS],
+	  SUM(CASE WHEN v2.OverdueDays >=90 THEN (CASE WHEN l.Lit_date <= v2.CalculationDate THEN COALESCE(l.Lit_amount *100, v2.PrincipalBalance, 0) ELSE COALESCE(v2.PrincipalBalance,0)END) ELSE NULL END)/100000000 [PD 90 UZS]
+  INTO  #Portfolio_PreCalculationForRepLoans_add
+		FROM 	 RiskDB.dbo.vwLoanSnapshots AS v2    WITH(NOLOCK)
+	inner JOIN 	  [RiskDB].[dbo].[ICL_Apps] AS icl  WITH(NOLOCK) ON icl.ID_D = v2.AccountId
+LEFT JOIN #wof AS wof   ON wof.loan_id = v2.AccountId
+
+left join #LitigBalance as l on l.loan_id = v2.AccountId  AND v2.CalculationDate =  CASE WHEN DATEPART(WEEKDAY, v2.CalculationDate) = 7 THEN DATEADD(DAY, +1, l.load_date) -- Saturday
+																	  WHEN DATEPART(WEEKDAY, v2.CalculationDate) = 1 THEN DATEADD(DAY, +2, l.load_date) -- Sunday
+																	  ELSE l.load_date END --- this join joins saturday and sunday on monday, bcs there is no data for these days on uz table
+
+	WHERE 	 (v2.CalculationDate>= @l10d)
+	AND (wof.oper_day> v2.CalculationDate OR wof.oper_day IS NULL )AND v2.ActivationDate IS NOT NULL
+	AND coalesce(l.lit_amount,v2.PrincipalBalance) >0 AND icl.[6m_status] ='>2m' AND icl.fn_tbc_add_loan_indicator =1
+	GROUP BY 	  v2.CalculationDate
+
+
+--Находим портфель и ПД в %
+Insert INTO Riskdb.ReportBuilder.ICL_Portfolio_Block
+	SELECT
+    portcalc.[Date],
+    [Overall portfolio, #] = portcalc.[Overall portfolio, #],
+    [Overal portfolio, UZS] = portcalc.[Overal portfolio, UZS],
+    [PAR ALL] = portcalc.[PD ALL UZS] 	    / NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForRepLoans_add AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 30] = portcalc.[PD 30 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForRepLoans_add AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 90] = portcalc.[PD 90 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                     FROM #Portfolio_PreCalculationForRepLoans_add AS a
+                                                     WHERE a.[Date] = portcalc.[Date]), 0)
+													 ,													 
+cast('PortfolioBlock' as nvarchar(50)) AS [TableType],
+cast('RepLoansadds' as nvarchar(50)) as Category
+	FROM  #Portfolio_PreCalculationForRepLoans_add AS portcalc
+
+
+
+
+
+Insert INTO Riskdb.ReportBuilder.ICL_Portfolio_Block_full
+	SELECT
+    portcalc.[Date],
+    [Overall portfolio, #] = portcalc.[Overall portfolio, #],
+    [Overal portfolio, UZS] = portcalc.[Overal portfolio, UZS],
+    [PAR ALL] = portcalc.[PD ALL UZS] 	    / NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForRepLoans_add AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 30] = portcalc.[PD 30 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                      FROM #Portfolio_PreCalculationForRepLoans_add AS a
+                                                      WHERE a.[Date] = portcalc.[Date]), 0),
+    [PAR 90] = portcalc.[PD 90 UZS]			/ NULLIF((SELECT TOP 1 a.[Overal portfolio, UZS]
+                                                     FROM #Portfolio_PreCalculationForRepLoans_add AS a
+                                                     WHERE a.[Date] = portcalc.[Date]), 0)
+													 ,													 
+cast('PortfolioBlock' as nvarchar(50)) AS [TableType],
+cast('RepLoansadds' as nvarchar(50)) as Category
+	FROM  #Portfolio_PreCalculationForRepLoans_add AS portcalc
+	--------------------------------------------------END OF SECOND PART/START OF THIRD PART--------------------------------------------
+	
+	
+drop table if exists #SegOverall1,#SegOverall2,#SegUnique_loans_PerDay,#SegFinalOverAllLoans
+
+---------------------------***************	Overall	Шаг 1		**************-----------------------------------
+--Находим кол-во апликаций
+
+SELECT DISTINCT
+    [Period_in_Days]  = CAST(s.fn_today AS DATE) ,
+    [App_Numbers_Qty] = COUNT(s.ID_A),
+	[Approval_rate_Percent] =  COUNT(CASE WHEN  s.fn_final_result = 1 THEN s.ID_A ELSE NULL END)*1.0 / COUNT(s.ID_A),
+	s.fn_high_segment
+INTO  #SegOverall1
+FROM RiskDB.[dbo].[ICL_Apps] AS  s  with(nolock)
+inner join #Unique_apps_PerDay as pr on pr.appl_id = s.ID_A
+WHERE s.fn_today >= @l10d
+ AND s.fn_today >= '2021-01-01' 
+GROUP BY s.fn_today,s.fn_high_segment;
+
+
+
+
+---------------------------***************	Overall	Шаг 2		**************-----------------------------------
+--Выдачи в разрезе дня что бы избежать умножения если человек сделал несколько кредитов за день
+
+SELECT
+FORMAT(s.contract_date,'yyyy-MM-dd') AS [Calc_Date],
+w.in_form_pers_id,
+MAX(s.loan_id) loan_id,
+MAX(s.contract_sum_nom) AS amount,
+MAX(w.fn_final_offered_amnt) AS fn_final_offered_amnt,
+w.fn_high_segment
+
+INTO   #SegUnique_loans_PerDay
+FROM  #loans AS s
+INNER JOIN [RiskDB].[dbo].[ICL_Apps] AS w WITH(NOLOCK)  ON w.ID_D = s.loan_id
+GROUP BY FORMAT(s.contract_date,'yyyy-MM-dd')
+, w.in_form_pers_id,fn_high_segment
+
+
+
+
+--Находим кол-во выдач
+SELECT u.Calc_Date AS  [Period_in_Days]  ,
+SUM(u.amount)/1000000 AS  [Disb_amount_M_UZS],
+COUNT(u.loan_id) AS [Disb_numbers_Qty],
+AVG(u.amount)/1000000 AS [Avg_ticket_size_UZS],
+[Utilization_Percent] =     COALESCE((SUM(u.amount) / NULLIF(SUM(u.fn_final_offered_amnt), 0)),0)
+,fn_high_segment
+INTO   #SegOverall2
+FROM #SegUnique_loans_PerDay AS u
+WHERE CAST(u.Calc_Date AS DATE) >= @l10d
+GROUP BY u.[Calc_Date],fn_high_segment
+
+
+
+
+--Обьяденяем наш результат по Оверолл
+SELECT o1.*,
+   [Net_Take_up_Percent] = o2.Disb_numbers_Qty*1.0  / NULLIF(o1.App_Numbers_Qty, 0),
+   [Take_up_Percent_Qty] = o2.Disb_numbers_Qty*1.0  / NULLIF(o1.App_Numbers_Qty * NULLIF(o1.[Approval_rate_Percent], 0),0),
+ [Utilization_Percent] = o2.[Utilization_Percent],
+   o2.Disb_numbers_Qty,
+   o2.Disb_amount_M_UZS,
+ [Avg_ticket_size_UZS] = o2.[Avg_ticket_size_UZS] 
+ INTO #SegFinalOverAllLoans
+FROM #SegOverall1 AS o1
+LEFT JOIN #SegOverall2 AS o2 ON o1.[Period_in_Days] = o2.[Period_in_Days] AND o1.fn_high_segment = o2.fn_high_segment
+
+
+
+
+INSERT INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+CAST('SegmentBlock' AS NVARCHAR(50)) AS [TableType],
+a.[fn_high_segment] AS Category
+ FROM #SegFinalOverAllLoans AS a 
+WHERE a.[Period_in_Days] !=CAST(GETDATE() AS DATE)
+
+
+
+
+
+INSERT INTO Riskdb.ReportBuilder.ICL_Application_and_Segment_Block_full
+SELECT a.[Period_in_Days],
+a.[App_Numbers_Qty],
+a.[Approval_rate_Percent],
+a.[Net_Take_up_Percent],
+a.[Take_up_Percent_Qty],
+a.[Utilization_Percent],
+a.[Disb_numbers_Qty],
+a.[Disb_amount_M_UZS],
+a.[Avg_ticket_size_UZS],
+CAST('SegmentBlock' AS NVARCHAR(50)) AS [TableType],
+a.[fn_high_segment] AS Category
+ FROM #SegFinalOverAllLoans AS a 
+WHERE a.[Period_in_Days] !=CAST(GETDATE() AS DATE)
+	
+ EXEC [dbo].[RB_Risk_Report_ICL_Daily_FPD] --procedure which calculates FPD
+
+
+EXEC RiskDB.dbo.RB_Risk_Report_ICL_Daily_dateframes --procedure which calculates dateframes
+
+END;
+GO
+
+
