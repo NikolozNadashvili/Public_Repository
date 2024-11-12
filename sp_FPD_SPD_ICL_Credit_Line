@@ -1,0 +1,392 @@
+USE [RiskDB]
+GO
+/****** Object:  StoredProcedure [dbo].[sp_FPD_SPD_ICL_v2]    Script Date: 11/12/2024 5:59:26 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+
+
+
+
+
+
+
+
+ALTER  PROCEDURE --EXEC
+[dbo].[sp_FPD_SPD_ICL_v2] 
+AS
+BEGIN
+
+
+
+-- =============================================
+-- Procedure: Riskdb.dbo.FPD_FPD_ICL_v2
+-- Created By: Nikoloz Nadashvili
+-- Created Date: 2024/05/23
+-- Last Script Update Date: -
+-- AVG run time : 23 min
+-- Description: This procedure calculates FPD and FPD for the 
+-- ICL with new logic and inserting it in FPD_POS_ICL  & FPD_POS_ICL tables. It is used for various reports in PBI 
+
+-- =============================================
+
+DECLARE @RunID INT;
+DECLARE @StartTime DATETIME = GETDATE();
+
+INSERT INTO RiskDB.system.TableUpdateLog (ProcedureName, TableName, StartTime, Status, LogDate)
+VALUES ('sp_FPD_SPD_ICL_v2', 'FPD_SPD_ICL_v2', @StartTime, 'In Progress', CAST(GETDATE() AS DATE));
+
+SET @RunID = SCOPE_IDENTITY();
+
+
+
+
+	 -- ========== Описание Блока: Декларируем даты ==========
+	-- в этом блоке мы декларируем начало месяца для вчерашнего дня -135 дней
+	-- 135 потому что мы используем первый платеж максимум через 45 дней + ФПД 90 = 135 дней
+	-- А начало месяца просто страховка,в принципе это не обязательно
+	
+	
+
+		DECLARE @start_date  AS DATE =   DATEADD(DAY, -180, GETDATE())	
+	--	'20200101'
+		DECLARE @today AS DATE = GETDATE() 
+	-- ========== Описание Блока: Создание таблицы выдач ==========
+	-- в этом блоке я создаю таблицу что бы потом использовать в скрипте
+	-- и каждый раз не пересчитывать
+
+	DROP TABLE IF EXISTS  #LoanSnapshots
+	 SELECT 
+			 v2.AccountId
+			,[CalculationDate] = CAST(v2.CalculationDate AS DATE)
+			,[ActivationDate] = cast(v2.ActivationDate AS DATE)
+			,[ClosedDate] = cast(v2.ClosedDate AS DATE)
+			,[NextPaymentDate_F] = ISNULL(cast(v2.NextPaymentDate AS DATE),DATEADD(DAY, 45, cast(v2.ActivationDate as date)))
+			,[NextPaymentDate_S] = ISNULL(cast(v2.NextPaymentDate AS DATE),DATEADD(DAY, 30, cast(v2.ActivationDate as date)))
+			,[NextPaymentDate_O] =  cast(v2.NextPaymentDate AS DATE)
+			,v2.Amount
+			,v2.OverdueDays
+			,p.ParentLoan
+			,p.LoanLevel
+	 INTO #LoanSnapshots
+	 FROM RiskDB.dbo.vwLoanSnapshots AS v2 WITH(NOLOCK)
+	 LEFT JOIN RiskDB.calc.Primal_IDs AS p WITH(NOLOCK) ON p.loanid = v2.AccountId
+	 WHERE v2.Snap_Type = 1    AND v2.ActivationDate >= @start_date
+
+	 -- ========== Описание Блока: Создание таблицы аппликаций ==========
+	-- в этом блоке я создаю таблицу что бы потом использовать в скрипте
+	-- и каждый раз не пересчитывать
+	 
+	    DROP TABLE IF EXISTS #ICL_Apps
+		SELECT 
+				 a.Disbursed_Amount
+				,a.fn_today
+				,a.date_start
+				,a.ID_D
+				,p.ParentLoan
+				,p.LoanLevel
+				,r.fn_anti_fraud_score
+				,r.in_tmx_policy_score
+				,a.in_form_pers_id
+				,a.[6m_status]
+				,a.fn_high_segment
+				,a.Merchant
+				,a.Product_Subtype
+				,a.Payme
+			
+		INTO #ICL_Apps
+		FROM  RiskDB.dbo.ICL_Apps AS a WITH(NOLOCK)
+		LEFT JOIN riskdb.calc.Primal_IDs AS p WITH(NOLOCK) ON a.ID_D = p.loanid
+		LEFT JOIN   db.wings.score_icl AS  r	 ON a.WingsID = r.wings_id
+		WHERE a.Disbursed ='1'     AND a.fn_today >=  @start_date
+
+	
+	 -- ========== Описание Блока: Нахождение даты первого платежа ==========
+	-- в этом блоке я нахожу дату первого платежа,но если его нет 
+	-- то мы вручную присуждаем 45 дней после активации
+	   
+	DROP TABLE IF EXISTS #First_Payment_Date
+	SELECT 
+			 v2.ParentLoan
+			,[FirstPaymentDate] = MIN(v2.NextPaymentDate_F)
+			,[MaxOverdue] = MAX(v2.OverdueDays) 	
+			,[MaxClosedDate] = MAX(v2.ClosedDate)
+			,[ActivationDate] = MIN(v2.ActivationDate)
+			,[LoanLevel] = MAX(v2.loanlevel) 
+			,[MaxAmount] = MAX(v2.Amount) 
+	INTO #First_Payment_Date
+	FROM #LoanSnapshots AS v2
+	GROUP BY v2.ParentLoan
+	
+	   
+		 -- ========== Описание Блока: Ближайший ФПД к сумме==========
+	-- Этот блок находит в кредитной линий самый близкий айдишник к выходу в ФПД 
+	-- что бы потом взять оттуда выданную суммую
+	-- Приходится брать с аппов потому что в выдачах у нас нету времени
+		DROP TABLE IF EXISTS #Disbursed_Amount_FPD
+		SELECT 
+		        [LoanID] = f.parentloan
+		      , [Disb.amount_for_FPD] = FIRST_VALUE(f.Disbursed_Amount) OVER (PARTITION BY f.parentloan ORDER BY DATEDIFF(MINUTE, f.date_start, a.FirstPaymentDate))
+		INTO #Disbursed_Amount_FPD
+		FROM #ICL_Apps AS f
+		LEFT JOIN #First_Payment_Date AS a ON a.parentloan = f.parentloan
+		WHERE DATEDIFF(MINUTE, f.date_start, a.FirstPaymentDate) > 0;
+
+	 	 -- ========== Описание Блока: Нахождение даты ФПД==========
+	-- Этот блок находит в дату ФПД
+	-- тут я приджоиниваю к примеру для ФПД 15 к ФПД 14 и 15 потому что часто дни просрочки
+	-- записанны по разному,где например первая просрочка(1 день) иногда в день просрочки а иногда на след. день
+	--Сделал #Pre_FPD_Dates что бы не добавлять в сабквери
+	  DROP TABLE IF EXISTS  #Pre_FPD_Dates
+	  SELECT  
+				  v2.ParentLoan
+				, [DaysDiff] = DATEDIFF(DAY, fpd.FirstPaymentDate, v2.CalculationDate) 
+				, v2.CalculationDate AS CalculationDate
+				, v2.OverdueDays
+	  INTO #Pre_FPD_Dates
+	  FROM       #LoanSnapshots AS v2
+	  INNER JOIN #First_Payment_Date AS fpd ON fpd.parentloan = v2.ParentLoan 
+											   AND (DATEDIFF(DAY, fpd.FirstPaymentDate, v2.CalculationDate) IN (0,1,2,3,4,5,6,7,14,15,29,30,89,90))  
+
+	DROP TABLE IF EXISTS #FPD_Dates
+	SELECT 
+	     ST.ParentLoan
+	    ,[FPD1] = MAX(CASE WHEN ST.DaysDiff IN(0,1,2,3,4,5,6,7)   AND	ST.OverdueDays >= 1 THEN   ST.CalculationDate END) 
+	    ,[FPD7] = MAX(CASE WHEN ST.DaysDiff IN(6,7)   AND	ST.OverdueDays >= 7 THEN   ST.CalculationDate  END)
+	    ,[FPD15] = MAX(CASE WHEN ST.DaysDiff IN(14,15) AND ST.OverdueDays >= 15 THEN  ST.CalculationDate  END) 
+	    ,[FPD30] = MAX(CASE WHEN ST.DaysDiff IN(29,30) AND ST.OverdueDays >= 30 THEN  ST.CalculationDate  END) 
+	    ,[FPD90] = MAX(CASE WHEN ST.DaysDiff IN(89,90) AND ST.OverdueDays >= 90 THEN  ST.CalculationDate  END) 
+		INTO #FPD_Dates
+	FROM       #Pre_FPD_Dates AS ST
+	GROUP BY st.ParentLoan
+	
+	
+	 	 -- ========== Описание Блока: Заливка в таблицу ==========
+	-- Это финальный блок который заливает в таблицу данные
+	-- и тут тоже есть калькуляции и логика 
+
+DELETE FROM  Riskdb.[Calc].[FPD_ICL_new] WHERE issue_date >= @start_date ;
+INSERT INTO  Riskdb.[Calc].[FPD_ICL_new] 
+
+	SELECT DISTINCT
+                 [LoanID]= a.ID_D
+                ,[PINFL]= a.in_form_pers_id
+                ,[New/Repeated Client]= a.[6m_status]
+                ,[Segment]= a.fn_high_segment
+				,[Antifraud_score] = a .fn_anti_fraud_score
+				,[TMX_score] = a.in_tmx_policy_score
+				,[Is_Active]= CASE WHEN m.MaxClosedDate IS NULL THEN 1 ELSE 0 END 
+				,[Issue_Date]= m.activationdate 
+                ,[Appl_time]= FORMAT(a.date_start, 'yyyy-MM-dd HH:mm')	
+				,[Closeddate]= m.MaxClosedDate 
+				,[ICL/POS] = 'ICL'
+                ,[SubProduct]= 'ICL'
+				,[LoanLevel] = m.loanlevel
+				,[Disb_amount_for_FPD] = COALESCE(d.[Disb.amount_for_FPD],m.maxamount)
+			    ,[First_Payment_Date] = m.FirstPaymentDate 
+				,[Matured for FPD1]=  CASE WHEN @today > m.FirstPaymentDate THEN 1 ELSE 0 END 
+				,[Matured for FPD7] = CASE WHEN @today > DATEADD  (DAY ,6,m.FirstPaymentDate)  THEN 1  ELSE 0 END 
+				,[Matured for FPD15]= CASE WHEN @today > DATEADD(DAY, 14, m.FirstPaymentDate)  THEN 1  ELSE 0 END 
+				,[Matured for FPD30]= CASE WHEN @today > DATEADD(DAY, 29, m.FirstPaymentDate)  THEN 1  ELSE 0 END 
+				,[Matured for FPD90]= CASE WHEN @today > DATEADD(DAY, 89, m.FirstPaymentDate)  THEN 1  ELSE 0 END 
+				--,[FPD1]  = CASE WHEN fpd.FPD1  IS NOT NULL THEN 1 ELSE 0 END
+				--,[FPD7]  = CASE WHEN fpd.FPD7  IS NOT NULL THEN 1 ELSE 0 END
+				--,[FPD15] = CASE WHEN fpd.FPD15 IS NOT NULL THEN 1 ELSE 0 END
+				--,[FPD30] = CASE WHEN fpd.FPD30 IS NOT NULL THEN 1 ELSE 0 END
+				--,[FPD90] = CASE WHEN fpd.FPD90 IS NOT NULL THEN 1 ELSE 0 END
+
+				,[FPD1]  = CASE WHEN COALESCE(fpd.FPD1,fpd.FPD7,fpd.FPD15,fpd.FPD30,fpd.FPD90) IS NOT NULL THEN 1 ELSE 0 END 
+				,[FPD7]  = CASE WHEN COALESCE(fpd.FPD7,fpd.FPD15,fpd.FPD30,fpd.FPD90)  IS NOT NULL THEN 1 ELSE 0 END
+				,[FPD15] = CASE WHEN COALESCE(fpd.FPD15,fpd.FPD30,fpd.FPD90) IS NOT NULL THEN 1 ELSE 0 END
+				,[FPD30] = CASE WHEN COALESCE(fpd.FPD30,fpd.FPD90) IS NOT NULL THEN 1 ELSE 0 END
+				,[FPD90] = CASE WHEN fpd.FPD90 IS NOT NULL THEN 1 ELSE 0 END
+
+
+				,[FPD1 Date] =  CASE WHEN fpd.FPD1 IS NOT NULL THEN   DATEADD(DAY,1,m.FirstPaymentDate  ) else null END
+				,[FPD7 Date] =  CASE WHEN fpd.FPD7 IS NOT NULL THEN   DATEADD(DAY,7,m.FirstPaymentDate  ) else null END
+				,[FPD15 Date] = CASE WHEN fpd.FPD15 IS NOT NULL THEN  DATEADD(DAY,15,m.FirstPaymentDate ) else null END
+				,[FPD30 Date] = CASE WHEN fpd.FPD30 IS NOT NULL THEN  DATEADD(DAY,30,m.FirstPaymentDate ) else null END
+				,[FPD90 Date] = CASE WHEN fpd.FPD90 IS NOT NULL THEN  DATEADD(DAY,90,m.FirstPaymentDate ) else null END
+				,[Merchant] =a.Merchant
+				,[HFPT] = NULL
+				,[Payme] = a.Payme 	
+	FROM #ICL_Apps AS a 
+	LEFT JOIN #First_Payment_Date AS m ON m.ParentLoan = a.ID_D
+	LEFT JOIN #Disbursed_Amount_FPD AS d ON d.loanid = a.ID_D
+	LEFT JOIN #FPD_Dates AS fpd ON fpd.ParentLoan = a.ID_D
+	WHERE  a.LoanLevel = 0  
+	
+
+	
+-----Конец первой части
+-----Начало СПД
+DROP TABLE IF EXISTS   #SPD_F
+	SELECT DISTINCT
+		  v2.AccountId,
+		  [NextPaymentDate] = CASE WHEN v2.NextPaymentDate_S < v2.ClosedDate OR ClosedDate IS NULL OR v2.ActivationDate = v2.ClosedDate
+		  						   THEN v2.NextPaymentDate_S
+		  						   ELSE NULL
+		  					  END
+	INTO #SPD_F
+	FROM  #LoanSnapshots AS v2 
+
+
+DROP TABLE IF EXISTS #SPD_R
+    SELECT DISTINCT
+						  b.AccountId
+						,[FirstPaymentDate] =  MAX(CASE WHEN b.rn = 1 THEN b.NextPaymentDate END) 
+						,[SecondPaymentDate] = MAX(CASE WHEN b.rn = 2 THEN b.NextPaymentDate END) 
+	INTO #SPD_R
+
+  FROM 
+  (SELECT a.AccountId,
+  	     a.NextPaymentDate,
+  	     ROW_NUMBER() OVER (PARTITION BY a.AccountId ORDER BY a.NextPaymentDate) AS rn	
+   FROM #SPD_F AS a
+   WHERE a.NextPaymentDate IS NOT NULL) AS b
+   GROUP BY b.AccountId
+
+   
+   DROP TABLE IF EXISTS #SPD
+    SELECT 
+		 r.AccountId,
+         [SecondPaymentDate] = ISNULL(r.SecondPaymentDate,DATEADD(DAY,30,r.FirstPaymentDate))
+	INTO #SPD
+	FROM #SPD_R AS r
+
+
+	DROP TABLE IF EXISTS #SecondPaymentDate
+ SELECT 
+      v.ParentLoan
+	, [SecondPaymentDate] = MIN(s.SecondPaymentDate) 
+    , [MaxOverdue] = MAX(v.OverdueDays) 
+    , [MaxClosedDate] = MAX(CAST( v.ClosedDate AS DATE)) 
+	, [activationdate] = MIN(CAST(v.activationdate AS DATE)) 
+	, [loanlevel] = MAX(v.loanlevel) 
+	, [maxamount] = MAX(v.Amount) 
+INTO  #SecondPaymentDate
+FROM #LoanSnapshots AS v 
+LEFT JOIN #SPD AS s ON s.AccountId = v.AccountId
+GROUP BY v.ParentLoan
+
+
+	DROP TABLE IF EXISTS #Disbursed_Amount_SPD
+		SELECT DISTINCT
+		        [LoanID] = f.parentloan
+		       ,[Disb.amount_for_SPD] = FIRST_VALUE(f.Disbursed_Amount) OVER (PARTITION BY f.parentloan ORDER BY DATEDIFF(MINUTE, f.date_start, a.SecondPaymentDate))
+		INTO #Disbursed_Amount_SPD
+		FROM #ICL_Apps AS f
+		LEFT JOIN #SecondPaymentDate AS a ON a.parentloan = f.parentloan
+		WHERE DATEDIFF(MINUTE, f.date_start, a.SecondPaymentDate) > 0;
+
+
+
+	  DROP TABLE IF EXISTS  #Pre_SPD_Dates
+	  SELECT  
+						 v2.ParentLoan
+						,[DaysDiff] = DATEDIFF(DAY, SPD.SecondPaymentDate, v2.CalculationDate) 
+						,v2.CalculationDate 
+						,v2.OverdueDays
+	  INTO #Pre_SPD_Dates
+	  FROM       #LoanSnapshots AS v2
+	  INNER JOIN #SecondPaymentDate AS SPD ON SPD.parentloan = v2.ParentLoan 
+											   AND (DATEDIFF(DAY, SPD.SecondPaymentDate, v2.CalculationDate) IN (0,1,2,3,4,5,6,7,14,15,29,30,89,90))  
+
+
+	DROP TABLE IF EXISTS #SPD_Dates
+	SELECT 
+	     ST.ParentLoan
+	    ,[SPD1] =  MAX(CASE WHEN ST.DaysDiff IN(0,1,2,3,4,5,6,7)   AND	ST.OverdueDays >= 1 THEN   ST.CalculationDate END)
+	    ,[SPD7] =  MAX(CASE WHEN ST.DaysDiff IN(6,7)   AND	ST.OverdueDays >= 7 THEN   ST.CalculationDate  END)
+	    ,[SPD15] = MAX(CASE WHEN ST.DaysDiff IN(14,15) AND ST.OverdueDays >= 15 THEN  ST.CalculationDate  END) 
+	    ,[SPD30] = MAX(CASE WHEN ST.DaysDiff IN(29,30) AND ST.OverdueDays >= 30 THEN  ST.CalculationDate  END) 
+	    ,[SPD90] = MAX(CASE WHEN ST.DaysDiff IN(89,90) AND ST.OverdueDays >= 90 THEN  ST.CalculationDate  END) 
+		INTO #SPD_Dates
+	FROM       #Pre_SPD_Dates AS ST
+	GROUP BY st.ParentLoan
+	
+	
+DELETE FROM   Riskdb.[calc].[SPD_ICL_new] WHERE Issue_Date >= @start_date ;
+INSERT INTO   Riskdb.[calc].[SPD_ICL_new] 
+ SELECT 
+                 [LoanID]= a.ID_D
+                ,[PINFL]= a.in_form_pers_id
+                ,[New/Repeated Client]= a.[6m_status]
+                ,[Segment]= a.fn_high_segment
+				,[Antifraud_score] = a.fn_anti_fraud_score
+				,[TMX_score] = a.in_tmx_policy_score
+				,[Is_Active]= CASE WHEN m.MaxClosedDate IS NULL THEN 1 ELSE 0 END 
+				,[Issue_Date]= m.activationdate 
+                ,[Appl_time]= FORMAT(a.date_start, 'yyyy-MM-dd HH:mm')	
+				,[Closeddate]= m.MaxClosedDate 
+				,[ICL/POS] = 'ICL'
+                ,[SubProduct]= a.Product_Subtype
+				,[LoanLevel] = m.loanlevel
+				,[Disb_amount_for_SPD] = COALESCE(d.[Disb.amount_for_SPD],m.maxamount)
+			    ,[Second_Payment_date] = m.SecondPaymentDate 
+				,[Matured for SPD1]=  CASE WHEN @today > m.SecondPaymentDate THEN 1 ELSE 0 END 
+				,[Matured for SPD7] = CASE WHEN @today > DATEADD(DAY ,6,m.secondPaymentDate)    THEN 1  ELSE 0 END  
+				,[Matured for SPD15]= CASE WHEN @today > DATEADD(DAY, 14, m.secondPaymentDate)  THEN 1  ELSE 0 END 
+				,[Matured for SPD30]= CASE WHEN @today > DATEADD(DAY, 29, m.secondPaymentDate)  THEN 1  ELSE 0 END 
+				,[Matured for SPD90]= CASE WHEN @today > DATEADD(DAY, 89, m.secondPaymentDate)  THEN 1  ELSE 0 END 
+				--,[SPD1]  = CASE WHEN SPD.SPD1  IS NOT NULL THEN 1 ELSE 0 END
+				--,[SPD7]  = CASE WHEN SPD.SPD7  IS NOT NULL THEN 1 ELSE 0 END
+				--,[SPD15] = CASE WHEN SPD.SPD15 IS NOT NULL THEN 1 ELSE 0 END
+				--,[SPD30] = CASE WHEN SPD.SPD30 IS NOT NULL THEN 1 ELSE 0 END
+				--,[SPD90] = CASE WHEN SPD.SPD90 IS NOT NULL THEN 1 ELSE 0 END
+
+				,[SPD1]  = CASE WHEN COALESCE(spd.SPD1,spd.SPD7,spd.SPD15,spd.SPD30,spd.SPD90) IS NOT NULL THEN 1 ELSE 0 END 
+				,[SPD7]  = CASE WHEN COALESCE(spd.SPD7,spd.SPD15,spd.SPD30,spd.SPD90) IS NOT NULL THEN 1 ELSE 0 END
+				,[SPD15] = CASE WHEN COALESCE(spd.SPD15,spd.SPD30,spd.SPD90)IS NOT NULL THEN 1 ELSE 0 END
+				,[SPD30] = CASE WHEN COALESCE(spd.SPD30,spd.SPD90)IS NOT NULL THEN 1 ELSE 0 END
+				,[SPD90] = CASE WHEN spd.SPD90  IS NOT NULL THEN 1 ELSE 0 END
+
+				,[SPD1 Date] =  CASE WHEN SPD.SPD1 IS NOT NULL THEN  DATEADD(DAY,1,   m.secondPaymentDate) END    
+			    ,[SPD7 Date] =  CASE WHEN SPD.SPD7 IS NOT NULL THEN  DATEADD(DAY,7,   m.secondPaymentDate) END
+			    ,[SPD15 Date] = CASE WHEN SPD.SPD15 IS NOT NULL THEN  DATEADD(DAY,15,m.secondPaymentDate)  END
+			    ,[SPD30 Date] = CASE WHEN SPD.SPD30 IS NOT NULL THEN  DATEADD(DAY,30,m.secondPaymentDate)  END
+			    ,[SPD90 Date] = CASE WHEN SPD.SPD90 IS NOT NULL THEN  DATEADD(DAY,90,m.secondPaymentDate)  END
+				,[Merchant] =a.Merchant
+				,[Payme] = a.Payme
+
+ FROM #ICL_Apps AS a 
+LEFT JOIN #SecondPaymentDate AS m ON m.ParentLoan = a.ID_D
+LEFT JOIN #Disbursed_Amount_SPD AS d ON d.loanid = a.ID_D
+LEFT JOIN #SPD_Dates AS SPD ON SPD.ParentLoan = a.ID_D
+WHERE  a.LoanLevel =0
+
+
+	DROP TABLE IF EXISTS  #LoanSnapshots
+						 ,#ICL_Apps
+						 ,#First_Payment_Date
+						 ,#Disbursed_Amount_FPD
+						 ,#Pre_FPD_Dates
+						 ,#FPD_Dates
+						 ,#SPD_F
+						 ,#SPD_R
+						 ,#SPD
+						 ,#SecondPaymentDate
+						 ,#Disbursed_Amount_SPD
+						 ,#Pre_SPD_Dates
+						 ,#SPD_Dates
+
+
+						 
+DECLARE @EndTime DATETIME = GETDATE();
+DECLARE @DurationSeconds INT = DATEDIFF(SECOND, @StartTime, @EndTime);
+DECLARE @DurationFormatted VARCHAR(8) = CONVERT(VARCHAR(8), DATEADD(SECOND, @DurationSeconds, 0), 108);
+
+UPDATE RiskDB.system.TableUpdateLog
+SET EndTime = @EndTime,
+	Duration = @DurationSeconds,
+	DurationFormatted = @DurationFormatted,
+	Status = 'Updated'
+WHERE RunID = @RunID;
+
+ END 
+
