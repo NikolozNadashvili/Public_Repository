@@ -1,0 +1,852 @@
+USE [RiskDB]
+GO
+
+/****** Object:  StoredProcedure [dbo].[sp_Applications]    Script Date: 11/12/2024 6:00:35 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+
+ALTER	 PROCEDURE --EXEC  
+[dbo].[sp_Applications]
+AS
+BEGIN
+
+-- =============================================
+-- Procedure: sp_Applications
+-- Last Update Date:  2024/09/18
+-- Last Updated by : Giorgi Natroshvili
+-- AVG run time for last 10 days  : 10 min
+-- AVG run time for full script :30 min
+/*
+ Description: 
+We use this procedure to create apps for ICL and POS, including additional
+information that is used in most of our risk reports.
+Usually, we update the last 10 days to prevent database errors,
+holidays, or other issues. However, sometimes we refill the table fully.
+ */
+-- =============================================
+
+
+
+
+--- ♦ 1 ♦ --- Declare necessary variables 
+
+DECLARE		@date DATE;
+DECLARE		@30days DATE;
+--SET @date = --'2021-01-01';
+--'2020-01-01'
+SET			@date = DATEADD(DAY,-10,GETDATE()); 
+SET			@30days= DATEADD(DAY,-30,@date); 
+DECLARE @today AS DATE = GETDATE()
+
+
+
+DECLARE @RunID INT;
+DECLARE @StartTime DATETIME = GETDATE();
+
+INSERT INTO RiskDB.system.TableUpdateLog (ProcedureName, TableName, StartTime, Status, LogDate)
+VALUES ('sp_Applications', 'ICL(POS)_Apps', @StartTime, 'In Progress', CAST(GETDATE() AS DATE));
+
+SET @RunID = SCOPE_IDENTITY();
+
+
+/*If we want refill table just add here --
+
+SET @date = (
+    SELECT MIN(fn_today)
+    FROM (
+        SELECT MIN(a.fn_today) AS fn_today
+        FROM riskdb.dbo.ICL_Apps AS a
+        UNION ALL
+        SELECT MIN(b.fn_today) AS fn_today
+        FROM riskdb.dbo.POS_Apps AS b
+    ) AS Combined);
+*/ --AND here 
+
+/*
+--- ♦ 1 ♦ --- 
+Prepare Data for ICL Apps and Insert it into #ICL
+Which we will use in all over the script
+Not we taking data not only from score_icl
+But also from other sources
+*/
+
+DROP TABLE IF EXISTS #ICL
+SELECT in_baas_application
+		,appl_id
+		,[wingsid] =s.wings_id
+		,in_form_pers_id
+		,fn_today
+		,date_start
+		,in_form_appl_amnt
+		,SYS_LIMIT_MAX
+		,fn_final_offered_amnt
+		,fn_final_result
+		,fn_tbc_add_loan_indicator
+		,fn_new_client
+		,fn_high_segment
+		,fn_xgboost_score
+		,in_add_amount
+		,fn_hr_new_antifraud_score		
+		,FN_BL_CLIENT_COND_RATE			
+		,FN_BL_COMPANY_HR					
+		,FN_HR_REJECT_TIN					
+		,fn_hr_tax_new_last_7d_rep_cnt	
+		,fn_hr_tax_new_last_30d_rep_cnt	
+		,fn_hr_tax_new_last_90d_rep_cnt	
+		,fn_hr_tmx_policy_score			
+		,fn_tmx_treatment_ind				
+		,fn_xgboost_calibrated_pd	
+		,fn_lombard_hr
+		,fn_min_inc_req_cond_rate
+		,fn_client_age_cond_rate 
+		,fn_cli_young_age_cond_rate
+		,fn_cli_age_gender_cond_rate 
+		,fn_cnt_act_katm_contr_cond_rate
+		,fn_katm_inq_1mon_cond_rate
+		,fn_app_7d_counter_cond_rate
+		,fn_app_1d_counter_cond_rate 
+		,fn_hr_katm_new_max_dpd_l24m
+		,fn_hr_katm_new_max_dpd_l12m 
+		,fn_hr_katm_new_max_dpd_l3m 
+		,fn_last_24_month_dpd_cond_rate 
+		,fn_last_12_month_dpd_cond_rate
+		,fn_last_3_month_dpd_cond_rate 
+		,fn_max_overdues_tbc_cond_rate
+		,rl_csh_afd_rej
+		,dt_idle_skip_hard_rules
+		,fn_cr_segment_indicator 
+		,fn_skip_hard_rules_flag
+		,fn_hr_rej_segm
+		,fn_cash_scoring_group_hr
+		,COALESCE(
+			(ABS(fn_income_calculated)),
+                (ABS(fn_tax_salary_1)), (ABS(fn_tax_salary_2) ),
+                (ABS(fn_inps_salary_1)), (ABS(fn_inps_salary_2)),
+                (ABS(fn_trans_salary_1)), (ABS(fn_katm_salary)),0) AS Salary
+		,COALESCE(fn_katm_total_pmt,0) AS  [PMT_katm]
+INTO #ICL
+FROM DB.wings.Score_ICL AS s (NOLOCK)
+WHERE s.appl_id NOT LIKE '%test%' 
+	  -- AND ISNULL(s.SQ_CLIENT_WL, 0) = '0' -- Excluded the condition 08/28/2024 (Koval)
+	  AND ISNULL(s.fn_final_result, 0) != 2
+	  AND ISNULL(s.in_loan_type_new,'ICL') != 'CreditCard'
+	  AND s.fn_today >= @date AND s.fn_today < @today
+
+UNION ALL
+SELECT IIF(SI.Channel = 'Payme', 1, 0) AS in_baas_application
+		,S.ApplicationId AS appl_id
+		,[Wingsid] = NULL
+		,SI.PersonalNumber AS in_form_pers_id
+		,CAST(S.AddTime AS DATE) AS fn_today
+		,S.AddTime AS date_start
+		,SI.Amount AS in_form_appl_amnt
+		,S.MaxLoanLimit AS SYS_LIMIT_MAX
+		,S.OfferedAmount AS fn_final_offered_amnt
+		,S.IsApproved AS fn_final_result
+		,ISNULL(SI.AddLoan,0) AS fn_tbc_add_loan_indicator
+		,NULL AS fn_new_client
+		,NULL AS fn_high_segment
+		,NULL AS fn_xgboost_score
+		,SI.AddAmount AS in_add_amount
+		,NULL AS fn_hr_new_antifraud_score		
+		,NULL AS FN_BL_CLIENT_COND_RATE			
+		,NULL AS FN_BL_COMPANY_HR					
+		,NULL AS FN_HR_REJECT_TIN					
+		,NULL AS fn_hr_tax_new_last_7d_rep_cnt	
+		,NULL AS fn_hr_tax_new_last_30d_rep_cnt	
+		,NULL AS fn_hr_tax_new_last_90d_rep_cnt	
+		,NULL AS fn_hr_tmx_policy_score			
+		,NULL AS fn_tmx_treatment_ind				
+		,NULL AS fn_xgboost_calibrated_pd	
+		,NULL AS fn_lombard_hr
+		,NULL AS fn_min_inc_req_cond_rate
+		,NULL AS fn_client_age_cond_rate 
+		,NULL AS fn_cli_young_age_cond_rate
+		,NULL AS fn_cli_age_gender_cond_rate 
+		,NULL AS fn_cnt_act_katm_contr_cond_rate
+		,NULL AS fn_katm_inq_1mon_cond_rate
+		,NULL AS fn_app_7d_counter_cond_rate
+		,NULL AS fn_app_1d_counter_cond_rate 
+		,NULL AS fn_hr_katm_new_max_dpd_l24m
+		,NULL AS fn_hr_katm_new_max_dpd_l12m 
+		,NULL AS fn_hr_katm_new_max_dpd_l3m 
+		,NULL AS fn_last_24_month_dpd_cond_rate 
+		,NULL AS fn_last_12_month_dpd_cond_rate
+		,NULL AS fn_last_3_month_dpd_cond_rate 
+		,NULL AS fn_max_overdues_tbc_cond_rate
+		,NULL AS rl_csh_afd_rej
+		,NULL AS dt_idle_skip_hard_rules
+		,NULL AS fn_cr_segment_indicator 
+		,NULL AS fn_skip_hard_rules_flag
+		,NULL AS fn_hr_rej_segm
+		,NULL AS fn_cash_scoring_group_hr
+		,NULL Salary
+		,NULL [PMT_katm]
+FROM DB.space.ScoringResults AS S (NOLOCK)
+INNER JOIN DB.space.ScoringInputs AS SI (NOLOCK) ON SI.ScoringinputId = S.ScoringInputId  AND SI.Type = 1
+WHERE NOT EXISTS (SELECT 1 FROM DB.wings.Score_ICL AS W (NOLOCK)
+				  WHERE W.appl_id = CAST(S.ApplicationId AS VARCHAR (15))
+						AND ISNULL(W.in_baas_application, 0) = 0)
+	  AND S.ApplicationId IS NOT NULL				
+	  AND IIF(SI.Channel = 'Payme', 1, 0) = 0
+	  AND S.ApplicationId NOT IN (7966888, 7968122,7740121,7763754) ----channel is not correct
+	  AND s.AddTime >= @date  AND s.AddTime < @today
+UNION ALL
+SELECT IIF(SI.Channel = 'Payme', 1, 0) AS in_baas_application
+		,S.ApplicationId AS appl_id
+		,[Wingsid] = NULL
+		,SI.PersonalNumber AS in_form_pers_id
+		,CAST(S.AddTime AS DATE) AS fn_today
+		,S.AddTime AS date_start
+		,SI.Amount AS in_form_appl_amnt
+		,S.MaxLoanLimit AS SYS_LIMIT_MAX
+		,S.OfferedAmount AS fn_final_offered_amnt
+		,S.IsApproved AS fn_final_result
+		,ISNULL(SI.AddLoan,0) AS fn_tbc_add_loan_indicator
+		,NULL AS fn_new_client
+		,NULL AS fn_high_segment
+		,NULL AS fn_xgboost_score
+		,SI.AddAmount AS in_add_amount
+		,NULL AS fn_hr_new_antifraud_score		
+		,NULL AS FN_BL_CLIENT_COND_RATE			
+		,NULL AS FN_BL_COMPANY_HR					
+		,NULL AS FN_HR_REJECT_TIN					
+		,NULL AS fn_hr_tax_new_last_7d_rep_cnt	
+		,NULL AS fn_hr_tax_new_last_30d_rep_cnt	
+		,NULL AS fn_hr_tax_new_last_90d_rep_cnt	
+		,NULL AS fn_hr_tmx_policy_score			
+		,NULL AS fn_tmx_treatment_ind				
+		,NULL AS fn_xgboost_calibrated_pd	
+		,NULL AS fn_lombard_hr
+		,NULL AS fn_min_inc_req_cond_rate
+		,NULL AS fn_client_age_cond_rate 
+		,NULL AS fn_cli_young_age_cond_rate
+		,NULL AS fn_cli_age_gender_cond_rate 
+		,NULL AS fn_cnt_act_katm_contr_cond_rate
+		,NULL AS fn_katm_inq_1mon_cond_rate
+		,NULL AS fn_app_7d_counter_cond_rate
+		,NULL AS fn_app_1d_counter_cond_rate 
+		,NULL AS fn_hr_katm_new_max_dpd_l24m
+		,NULL AS fn_hr_katm_new_max_dpd_l12m 
+		,NULL AS fn_hr_katm_new_max_dpd_l3m 
+		,NULL AS fn_last_24_month_dpd_cond_rate 
+		,NULL AS fn_last_12_month_dpd_cond_rate
+		,NULL AS fn_last_3_month_dpd_cond_rate 
+		,NULL AS fn_max_overdues_tbc_cond_rate
+		,NULL AS rl_csh_afd_rej
+		,NULL AS dt_idle_skip_hard_rules
+		,NULL AS fn_cr_segment_indicator 
+		,NULL AS fn_skip_hard_rules_flag
+		,NULL AS fn_hr_rej_segm
+		,NULL AS fn_cash_scoring_group_hr
+		,NULL Salary
+		,NULL [PMT_katm]
+FROM DB.space.ScoringResults AS S (NOLOCK)
+INNER JOIN DB.space.ScoringInputs AS SI (NOLOCK) ON SI.ScoringinputId = S.ScoringInputId  AND SI.Type = 1
+WHERE NOT EXISTS (SELECT 1 FROM DB.wings.Score_ICL AS W (NOLOCK)
+				  WHERE W.appl_id = CAST(S.ApplicationId AS VARCHAR (15))
+						AND ISNULL(W.in_baas_application, 0) = 1)
+	  AND IIF(SI.Channel = 'Payme', 1, 0) = 1
+	  AND S.ApplicationId NOT IN (7966888, 7968122,7740121,7763754) ----channel is not correct
+	  AND s.AddTime >= @date AND s.AddTime < @today
+
+
+
+
+
+
+	
+/*
+♦ 2 ♦ 
+create table of payments table 
+which we will use for borrower flag
+*/
+
+DROP TABLE IF EXISTS  #payment
+   SELECT  
+   			pl.loan_id, 
+   			[payment_sum] = SUM(pl.payment_sum), 
+   			pl.payment_acc_type, 
+   			[oper_date] = pl.oper_date 
+   INTO #payment 
+   FROM [DB].[uzdwh].[v_loan_payments_all] pl WITH(NOLOCK)
+   WHERE	ISNULL(pl.is_add_loan, 0) <> 1
+  			AND ISNULL(pl.prob_offbalance_storno, 0) <> 1
+  			AND ISNULL(pl.is_client_payment,0) != 2 AND
+  			payment_acc_type =  'borrower block' 
+   			AND pl.oper_date >= @date
+   GROUP BY 
+  			pl.loan_id,
+  			pl.payment_acc_type,
+  			pl.oper_date
+
+			 
+DROP TABLE IF EXISTS #borrower
+	;WITH C_Users AS (
+    SELECT DISTINCT 
+			 [UserID] = Co.UsrUserId 
+            ,[Timestamp] = Ca.CreatedOn 
+			,ca.ContactId
+			,Ca.Subject
+    FROM DB.bpm.[Case] (NOLOCK) AS Ca
+    INNER JOIN DB.bpm.Contact AS Co WITH (NOLOCK)  ON Co.Id = CA.ContactId
+	WHERE ca.[SUBJECT] = 'Borrower blocked' 
+		  AND CAST(Ca.CreatedOn AS DATE) >= @date)
+
+	SELECT DISTINCT
+	         Cu.UserId
+	        ,[borrower_block_date] = CAST(DATEADD(hour, 3, Cu.Timestamp) AS DATE)  -- we have two due to the time differences of getting borrow block
+	        ,[ActivationDate] = MAX(wc.date_start) 
+	        ,[LoanId] = MAX(wc.appl_id)  
+	INTO #borrower
+	FROM             C_Users AS Cu
+	JOIN             DB.space.Customers (NOLOCK) AS C ON C.CustomerId = Cu.UserId
+	LEFT JOIN             #ICL wc (NOLOCK)
+	ON wc.in_form_pers_id = C.PersonalNumber AND CAST(DATEADD(hour, 3, Cu.Timestamp) AS DATE) >= CAST(wc.date_start AS DATE) --(add 3 hours diffarance)
+	LEFT JOIN   DB.dbo.v_risk_PaymeLoanApplications AS p WITH(NOLOCK) ON wc.appl_id = p.wings_applid
+	INNER JOIN (SELECT DISTINCT AccountId FROM  db.calc.LoanSnapshotsMerged WHERE CAST(ActivationDate AS DATE) > @date ) m ON 
+	CAST(CASE WHEN wc.in_baas_application = 1 AND p.IABS_loan_id IS NOT NULL THEN  p.IABS_loan_id
+	          WHEN wc.in_baas_application = 0 OR wc.in_baas_application IS NULL THEN wc.appl_id 
+			  ELSE NULL END AS NVARCHAR(50)) = m.AccountId
+	GROUP BY
+	    Cu.UserID
+	    ,CAST(DATEADD(hour, 3, Cu.Timestamp) AS DATE) 
+	   			 		  		  		 	   			
+
+--BEGIN TRAN 
+
+	
+/*
+♦ 3 ♦ 
+create table of Disbursement table 
+for full period,because we need some old data
+for calculating WOF and Duration
+*/
+
+DROP TABLE IF EXISTS #db		 
+	SELECT				[AccountId]=ins.appl_id ,
+						[Disbursed_Amt]=MAX(ins.disbursed_amount)  ,
+						[Duration]=DATEDIFF(DAY, MIN(ins.disbursement_date), MAX(agreement_end_date)) ,
+						[wof_date]=MIN(CASE WHEN ins.write_off_date = '0001-01-01 00:00:00.0000000' THEN NULL 
+											WHEN ins.write_off_date IS NULL THEN NULL 
+										ELSE CAST(ins.write_off_date AS DATE) END),
+						[interest_rate]=MIN(interest_rate),
+						[Productid]='2' ,
+						[activation_date]=MIN(CAST(ins.disbursement_date AS DATE)) 
+    INTO #db
+		 FROM			db.vendoo.INSTALLMENT_SNAPSHOTS_MERGED ins WITH(NOLOCK)
+		 WHERE			ISNULL(ins.delete_mark, 0) = 0
+		 GROUP BY		ins.appl_id
+		  
+    UNION ALL
+
+	SELECT				[AccountId]= CAST(l.AccountId AS VARCHAR(15)) ,
+						[Disbursed_Amt]= MAX(l.Amount)/100 , 
+						[Duration]= MAX(DATEDIFF(DAY, l.ActivationDate, l.RepaymentDate)) ,
+						[wof_date]= MIN(wof.oper_day) ,
+						[interest_rate]= MIN(l.interestrate) ,
+						[Productid]= MIN(l.Type) ,
+						[activation_date]= MIN(CAST(l.ActivationDate AS DATE)) 
+		  FROM			db.calc.LoanSnapshotsMerged AS l WITH(NOLOCK)
+		  LEFT JOIN		DB.uzdwh.write_off_loans AS wof  WITH(NOLOCK)
+		  ON			wof.loan_id = l.AccountId
+		  WHERE			l.activationdate IS NOT NULL
+		  GROUP BY		l.AccountId
+			
+
+
+
+/*
+♦ 4 ♦ 
+Here we creating one of main tables - ICL_Apps
+Before we will insert data - we deleting last 5 days
+*/
+
+
+
+DELETE	FROM	 Riskdb.dbo.ICL_Apps
+WHERE fn_today >= @date ;
+
+INSERT INTO  Riskdb.dbo.ICL_Apps
+SELECT DISTINCT
+			[ID_Pers] = CONCAT(CASE WHEN s.in_baas_application = 1 AND p.IABS_loan_id IS NOT NULL THEN  p.IABS_loan_id
+						WHEN s.in_baas_application = 1 AND p.IABS_loan_id IS NULL THEN s.appl_id
+						WHEN s.in_baas_application = 0 OR s.in_baas_application IS NULL THEN s.appl_id ELSE NULL END, s.in_form_pers_id)  ,
+
+			[ID_A] =    CAST(CASE WHEN s.in_baas_application = 1 AND p.IABS_loan_id IS NOT NULL THEN  p.IABS_loan_id
+					    WHEN s.in_baas_application = 1 AND p.IABS_loan_id IS  NULL THEN s.appl_id
+					    WHEN s.in_baas_application = 0 OR s.in_baas_application IS NULL THEN s.appl_id ELSE NULL END AS NVARCHAR(50)) ,
+
+			[ID_D] =    CAST(CASE WHEN s.in_baas_application = 1 AND p.IABS_loan_id IS NOT NULL THEN  p.IABS_loan_id
+					    WHEN s.in_baas_application = 0 OR s.in_baas_application IS NULL THEN s.appl_id ELSE NULL END AS NVARCHAR(50)) ,
+
+			[Wingsid] =  s.wingsid   ,
+			[fn_today] = s.fn_today , 
+			[date_start] = s.date_start,
+			s.in_form_pers_id,
+			[Product_Type] = 1  ,
+			[Product_Subtype] = 'ICL'  ,
+			s.in_form_appl_amnt,			
+			[fn_final_offered_amnt] = CASE WHEN s.SYS_LIMIT_MAX IS NULL THEN s.fn_final_offered_amnt ELSE s.SYS_LIMIT_MAX END  ,
+			s.fn_final_result,
+			[Duration] = NULL   ,
+			[Disbursed] = CASE WHEN ls.AccountID IS NOT NULL THEN 1 ELSE 0 END  , 
+			[Disbursed_Amount] = COALESCE(ls.Disbursed_Amt, 0)  ,
+			[Net_Disbursed_Amount] = CASE WHEN ISNULL(s.fn_tbc_add_loan_indicator, 0) = 1 THEN COALESCE(n.amount, 0) ELSE COALESCE(ls.Disbursed_Amt, 0) END  ,
+			[wof_date] = null   ,
+			[6m_status] = NULL  ,
+			s.fn_new_client,
+			s.fn_high_segment,
+			[BIN] = s.fn_xgboost_score  ,
+			s.fn_tbc_add_loan_indicator,
+			s.in_add_amount,
+			[interest_rate] = ls.interest_rate ,
+			[Merchant] = null,
+			[Antifraud_score] = ISNULL(s.fn_hr_new_antifraud_score, 0),
+			[Balck_list] = ISNULL(s.FN_BL_CLIENT_COND_RATE, 0),
+			[Employer_External_Black_List] = ISNULL(s.FN_BL_COMPANY_HR, 0),
+			[Employer_Black_List] = ISNULL(s.FN_HR_REJECT_TIN, 0),
+			[Tax_7] = ISNULL(s.fn_hr_tax_new_last_7d_rep_cnt, 0),
+			[Tax_30] = ISNULL(s.fn_hr_tax_new_last_30d_rep_cnt, 0),
+			[Tax_90] = ISNULL(s.fn_hr_tax_new_last_90d_rep_cnt, 0),
+			[TMX_score] = ISNULL(s.fn_hr_tmx_policy_score, 0),
+			[TMC_score_other] = ISNULL(s.fn_tmx_treatment_ind, 0),
+			[Calibrated_PD] = s.fn_xgboost_calibrated_pd,
+			[Test_Group] = CASE 
+				 WHEN fn_today >= '2024-05-08' AND ISNULL(s.fn_skip_hard_rules_flag,0) = 1 AND ISNULL(s.fn_cr_segment_indicator,0) = 0 THEN 'test1' 
+				 WHEN fn_today < '2024-05-08'  AND     
+				 (    ISNULL(s.fn_lombard_hr,0) +
+				      ISNULL(s.fn_min_inc_req_cond_rate,0) +
+				      ISNULL(s.fn_client_age_cond_rate,0) +
+				      ISNULL(s.fn_cli_young_age_cond_rate,0) +
+				      ISNULL(s.fn_cli_age_gender_cond_rate,0) +
+				      ISNULL(s.fn_cnt_act_katm_contr_cond_rate,0) +
+				      ISNULL(s.fn_katm_inq_1mon_cond_rate,0) +
+				      ISNULL(s.fn_app_7d_counter_cond_rate,0) +
+				      ISNULL(s.fn_app_1d_counter_cond_rate,0) +
+				      ISNULL(s.fn_hr_katm_new_max_dpd_l24m,0) +
+				      ISNULL(s.fn_hr_katm_new_max_dpd_l12m,0) +
+				      ISNULL(s.fn_hr_katm_new_max_dpd_l3m,0) +
+				      ISNULL(s.fn_last_24_month_dpd_cond_rate,0) +
+				      ISNULL(s.fn_last_12_month_dpd_cond_rate,0) +
+				      ISNULL(s.fn_last_3_month_dpd_cond_rate,0) +
+				      ISNULL(s.fn_max_overdues_tbc_cond_rate,0) +
+				      ISNULL(s.rl_csh_afd_rej,0)   ) > 0     AND ISNULL(s.dt_idle_skip_hard_rules,0) = 1 AND ISNULL(s.fn_cr_segment_indicator,0) = 0 THEN  'test1' 
+				WHEN ( ISNULL(s.fn_cr_segment_indicator,0) = 1 AND  ISNULL(s.fn_final_result,0) = 1)	 THEN 'test2'
+				WHEN ( ISNULL(s.rl_csh_afd_rej,0)  + 
+					   ISNULL(s.fn_app_7d_counter_cond_rate,0) +
+					   ISNULL(s.fn_client_age_cond_rate,0) + 
+					   ISNULL(s.fn_min_inc_req_cond_rate,0) + 
+					   ISNULL(s.fn_hr_rej_segm,0)  + 
+					   ISNULL(s.fn_lombard_hr,0) + 
+					   ISNULL(s.fn_cash_scoring_group_hr,0) ) > 0 AND  ISNULL(s.fn_cr_segment_indicator,0) = 1 THEN 'test2' 
+				ELSE 'Standard' END,
+			[Borrower_Block] = CASE WHEN b.LoanId IS NOT NULL THEN 1 ELSE 0 END  ,
+			[Borrower_Block_Ratio]=CASE WHEN (CASE WHEN B.LoanId  IS NOT NULL THEN 1 ELSE 0 END ) = 0   THEN 0 
+										ELSE CAST(CAST( pl.payment_sum  AS DECIMAL)/NULLIF(COALESCE(ls.Disbursed_Amt, 0), 0) AS DECIMAL(3, 2)) END  ,
+			[PTI_Ranges] = CASE 
+								WHEN COALESCE(s.Salary, 0) = 0 THEN 'Without Income'
+								WHEN (s.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(s.Salary, 0) * 100 > 100 THEN '>100%'
+								WHEN (s.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(s.Salary, 0) * 100 > 80 THEN '>80% <= 100%' 
+								WHEN (s.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(s.Salary, 0) * 100 > 60 THEN '>60% <= 80%'
+								WHEN (s.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(s.Salary, 0) * 100 > 50 THEN '>50% <= 60%'
+								WHEN (s.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(s.Salary, 0) * 100 > 40 THEN '>40% <= 50%'
+								WHEN (s.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(s.Salary, 0) * 100 > 30 THEN '>30% <= 40%'
+								WHEN (s.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(s.Salary, 0) * 100 > 20 THEN '>20% <= 30%'
+								WHEN (s.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(s.Salary, 0) * 100 > 10 THEN '>10% <= 20%'
+								WHEN (s.PMT_katm + COALESCE(lp.max_payment, 0)) / NULLIF(s.Salary, 0) * 100 <= 10 THEN '<=10%'
+								ELSE 'Not Identified' 
+							END,
+		    [Payme] = ISNULL(s.in_baas_application,0),
+			[Self_Scoring_Flag] = 0
+ 
+	FROM #ICL AS S
+	LEFT JOIN	DB.dbo.v_risk_PaymeLoanApplications AS p WITH(NOLOCK) ON s.appl_id = p.wings_applid
+	LEFT JOIN  #payment AS  pl WITH(NOLOCK)
+				ON CAST(CASE WHEN s.in_baas_application = 1 AND p.IABS_loan_id IS NOT NULL THEN  p.IABS_loan_id
+				        	 WHEN s.in_baas_application = 1 AND p.IABS_loan_id IS  NULL THEN s.appl_id
+							 WHEN s.in_baas_application = 0 OR s.in_baas_application IS NULL THEN s.appl_id ELSE NULL END AS NVARCHAR(50))= pl.loan_id 
+	LEFT JOIN 	#borrower AS B
+				ON CAST(CASE WHEN s.in_baas_application = 1 AND p.IABS_loan_id IS NOT NULL THEN  p.IABS_loan_id
+							 WHEN s.in_baas_application = 1 AND p.IABS_loan_id IS  NULL THEN s.appl_id
+							 WHEN s.in_baas_application = 0 OR s.in_baas_application IS NULL THEN s.appl_id ELSE NULL END AS NVARCHAR(50))=B.LoanId
+	LEFT JOIN	(SELECT * FROM #db	WHERE Productid = '1' AND activation_date >=@date)  AS ls
+				ON CAST((CASE WHEN s.in_baas_application = 1 AND p.IABS_loan_id IS NOT NULL THEN  p.IABS_loan_id
+							   WHEN s.in_baas_application = 0 OR s.in_baas_application IS NULL THEN s.appl_id 
+							   ELSE NULL END) AS varchar(50)) = ls.accountid 
+	LEFT JOIN		(SELECT		[Loanid] = d.LoanId  ,
+								[amount]= MIN(d.amount)  
+					 FROM		db.[dbo].[v_LoanDisbursement_NET] AS d WITH(NOLOCK) 
+					 WHERE		d.TimeStamp >=@date  
+					 GROUP BY	d.LoanId) AS n 
+				ON	n.loanid = (CASE WHEN s.in_baas_application = 1 AND p.IABS_loan_id IS NOT NULL THEN  p.IABS_loan_id
+									 WHEN s.in_baas_application = 0 OR s.in_baas_application IS NULL THEN s.appl_id ELSE NULL END)
+	LEFT JOIN db.uzdwh.max_loan_payment  lp ON lp.loan_id = CAST(CASE WHEN s.in_baas_application = 1 AND p.IABS_loan_id IS NOT NULL THEN  p.IABS_loan_id
+				        	 WHEN s.in_baas_application = 1 AND p.IABS_loan_id IS  NULL THEN s.appl_id
+							 WHEN s.in_baas_application = 0 OR s.in_baas_application IS NULL THEN s.appl_id ELSE NULL END AS NVARCHAR(50))
+
+
+--Deleting Dublicates
+;WITH DeleteRecords AS (SELECT ROW_NUMBER () OVER (PARTITION BY id_a, in_form_pers_id ORDER BY date_start DESC)AS RowNum,* 
+FROM  Riskdb.dbo.ICL_Apps (NOLOCK))
+
+DELETE FROM DeleteRecords
+WHERE RowNum > 1
+
+
+
+/*
+♦ 5 ♦ 
+We creating Temp Table for Score_Vendoo to use it 
+all amoung script 
+*/
+
+		DROP TABLE IF EXISTS #score_vendoo;
+SELECT  
+	sv.in_form_appl_id,
+	sv.in_form_pers_id,
+	sv.wings_id,
+	sv.fn_today,
+	sv.date_start,
+	sv.fn_anti_fraud_score,
+	sv.fn_high_segment,				    
+	sv.fn_cash_lr_group_pd,			    
+	sv.in_form_appl_amnt,				
+	sv.fn_tbc_product_max_loan_sum,		
+	sv.in_udevs_merchant_name,		
+	sv.fn_final_result,
+	sv.SQ_CLIENT_WL,
+	sv.fn_product_downpayment_price_1ar_01,
+	sv.fn_product_downpayment_price_1ar_02,
+	sv.fn_product_downpayment_price_1ar_03,
+	sv.fn_product_downpayment_price_1ar_04,
+	sv.fn_product_max_offered_cred_amnt,
+	sv.in_application_type_vd,
+	[Self_Scoring_Flag] = CASE WHEN COALESCE(sv.in_udevs_merchant_name,'0') = 'Self-Scoring' THEN 1 ELSE 0 END,
+	[Max_Date_Flag] = CASE WHEN 
+								ROW_NUMBER() OVER (PARTITION BY sv.in_form_appl_id ORDER BY sv.date_start DESC) = 1 THEN 1 
+						   ELSE 0 
+					  END -- этот флаг нужен для того что бы офферед эмаунт находить по последним заявкам(не селф скорам)
+INTO #Score_Vendoo
+FROM db.wings.score_vendoo sv
+WHERE sv.fn_today >= @30days 
+	AND sv.fn_today < @today
+	AND ISNULL(sv.in_udevs_merchant_name, 'l') <> 'ÎÎÎ TEST LTD'
+	AND  ISNULL(sv.fn_final_result, 0) != 2	;
+
+/*
+♦ 5.2 ♦ 
+We also creating Temp Table for with ranked columns
+to take thoose instead of originials 
+because of dublicates and self scoring apps 
+*/
+
+		
+ DROP TABLE IF EXISTS #Ranked_Vendoo
+
+SELECT	DISTINCT		
+					sv.in_form_appl_id,
+					[date_start] =						FIRST_VALUE(sv.date_start)				         OVER (PARTITION BY sv.in_form_appl_id ORDER BY date_start desc) ,
+					[wings_id] =						FIRST_VALUE(sv.wings_id)				         OVER (PARTITION BY sv.in_form_appl_id ORDER BY date_start desc) ,
+					[fn_high_segment] =					FIRST_VALUE(sv.fn_high_segment)				     OVER (PARTITION BY sv.in_form_appl_id ORDER BY date_start ASC)  ,
+					[BIN] =								FIRST_VALUE(sv.fn_cash_lr_group_pd)			     OVER (PARTITION BY sv.in_form_appl_id ORDER BY date_start ASC)  ,													
+					[Merchant] =						FIRST_VALUE(sv.in_udevs_merchant_name)			 OVER (PARTITION BY sv.in_form_appl_id ORDER BY date_start desc) ,
+					[Approved] =						MIN(sv.fn_final_result)							 OVER (PARTITION BY sv.in_form_appl_id) 
+			INTO #Ranked_Vendoo		
+			FROM		#score_vendoo AS sv
+		
+/*
+♦ 6 ♦ 
+Here we creating Another main table - POS_Apps
+Before we will insert data - we deleting last 5 days
+*/
+
+
+DELETE	FROM	riskdb.dbo.POS_Apps		WHERE fn_today >= @30days ;
+
+INSERT INTO		riskdb.dbo.POS_Apps
+
+--- ♦ 1 ♦ --- Declare necessary variables 
+
+	SELECT			
+				[ID_Pers] = CONCAT(sv.in_form_appl_id, sv.in_form_pers_id),
+				[ID_A] = CAST(sv.in_form_appl_id AS NVARCHAR(50)),
+				[ID_D] = CAST(ISNULL(bnpl.in_vd_mambu_appl_id, sv.in_form_appl_id) AS NVARCHAR(50)),
+				[Wingsid] = misc.wings_id, 
+				[fn_today] = sv.fn_today,
+				[date_start] = MIN(misc.date_start),
+				[in_form_pers_id] = sv.in_form_pers_id,
+				[Product_Type] = 2,
+				[Product_Subtype] = (CASE WHEN bnpl.in_vd_mambu_appl_id IS NOT NULL THEN 'BNPL' ELSE 'TFS' END),
+				[in_form_appl_amnt] = 0  ,
+				[fn_final_offered_amnt] = 0 ,
+				[fn_final_result] = MIN(fn_final_result),
+				[Duration] = CAST(NULL AS int),
+				[Disbursed] = (CASE WHEN ls.AccountId IS NOT NULL THEN 1 ELSE 0 END),
+				[Disbursed_Amt] = MIN(CASE WHEN ls.AccountId IS NOT NULL THEN ls.Disbursed_Amt ELSE 0 END),
+				[Net_Disbursed_Amount] = 0 ,
+				[wof_date] = NULL,
+				[6m_status] =NULL,
+				[fn_new_client] = NULL,
+				[fn_high_segment] = misc.fn_high_segment,
+				[BIN] = misc.BIN,
+				[fn_tbc_add_loan_indicator] = NULL,
+				[in_add_amount] = NULL,
+				[interest_rate] = MIN(ls.interest_rate),
+				[Merchant] = (CASE WHEN misc.Merchant = 'IDEA' THEN  'IDEA'	
+								   WHEN misc.Merchant = 'TEXNOMART_NEW' THEN 'TEXNOMART'
+								   WHEN misc.Merchant = 'MEDIAPARK GROUP' THEN 'MEDIAHOME'
+								   WHEN misc.Merchant = 'MEDIAHOME' THEN 'MEDIAHOME'
+								   ELSE misc.Merchant END),
+				[Antifraud_score] = MAX(sv.fn_anti_fraud_score),
+				[Balck_list] = NULL,
+				[Employer_External_Black_List] = NULL,
+				[Employer_Black_List] = NULL,
+				[Tax_7] = NULL,
+				[Tax_30] = NULL,
+				[Tax_90] = NULL,
+				[TMX_score] = NULL,
+				[TMX_score_other] = NULL,
+				[Calibrated_PD] = NULL,
+				[Test_Group] = NULL,
+				[Borrower_Block] = NULL,
+				[Borrower_Block_Ratio] = NULL,
+				[PTI_Ranges] = NULL	,
+				[Payme] = NULL,
+				[Self_Scoring_Flag] = MAX(sv.[Self_Scoring_Flag])
+	FROM			#score_vendoo sv WITH(NOLOCK)
+	LEFT JOIN		DB.wings.VD_Contact bnpl WITH(NOLOCK) ON				bnpl.appl_id = sv.in_form_appl_id
+	LEFT JOIN		#Ranked_Vendoo AS misc	 ON		misc.in_form_appl_id = sv.in_form_appl_id
+	 LEFT JOIN	( SELECT * FROM #db WHERE Productid ='2'  AND activation_date >= @30days ) ls ON	ls.AccountId= ISNULL(bnpl.in_vd_mambu_appl_id, sv.in_form_appl_id)
+	 WHERE		
+				 sv.fn_today < @today
+				AND  sv.fn_today >= @30days 
+
+	GROUP BY	CONCAT(sv.in_form_appl_id, sv.in_form_pers_id),
+				misc.wings_id,
+				sv.in_form_appl_id,
+				sv.fn_today ,
+				sv.in_form_pers_id,
+				misc.fn_high_segment,
+				misc.BIN,
+				(CASE WHEN bnpl.in_vd_mambu_appl_id IS NOT NULL THEN 'BNPL' ELSE 'TFS' END),
+				(CASE WHEN ls.AccountId IS NOT NULL THEN 1 ELSE 0 END),
+				ISNULL(bnpl.in_vd_mambu_appl_id, sv.in_form_appl_id),
+				(CASE WHEN misc.Merchant = 'IDEA' THEN  'IDEA'	
+					  WHEN misc.Merchant = 'TEXNOMART_NEW' THEN 'TEXNOMART'
+					  WHEN misc.Merchant = 'MEDIAPARK GROUP' THEN 'MEDIAHOME'
+					  WHEN misc.Merchant = 'MEDIAHOME' THEN 'MEDIAHOME'
+					  ELSE misc.Merchant END);
+;
+
+--Deleting Issues App
+DELETE FROM	 riskdb.dbo.POS_Apps WHERE ID_A = 'P000446218' AND fn_today = '2023-08-08'	;
+
+--COMMIT
+
+/*
+♦ 7 ♦ 
+Here we calculating client status 
+We executing procedure which is calculating it 
+ONLY for 1 day,so if we had issue few days - we must
+execute this for each day  when procedure failed
+*/
+DECLARE @Yesterday AS DATE ; 
+SET @Yesterday = DATEADD(DAY, -1, GETDATE())	;
+EXEC RiskDB.dbo.sp_clientstatus @today = @Yesterday;
+
+--Updating our result
+UPDATE		a
+	SET			a.[6m_status] = CASE WHEN s.Days = 0 THEN 'NEW'
+									 WHEN s.Days >= 61 THEN '>2m'
+									 ELSE '<=2m' END
+	FROM		Riskdb.dbo.ICL_Apps  AS a WITH(NOLOCK)
+	LEFT JOIN	riskdb.dbo.clientstatus6m_Simultaneous AS s  WITH(NOLOCK)
+	ON			a.ID_A = s.ID_A 
+				AND a.in_form_pers_id = s.in_form_pers_id 
+				AND a.fn_today = s.fn_today
+	WHERE		a.fn_today >= @30days;
+
+UPDATE		a
+	SET			a.[6m_status] = CASE WHEN s.Days = 0 THEN 'NEW'
+									 WHEN s.Days >= 61 THEN '>2m'
+									 ELSE '<=2m' END
+	FROM		riskdb.dbo.POS_Apps AS a WITH(NOLOCK)
+	LEFT JOIN	riskdb.dbo.clientstatus6m_Simultaneous AS s  WITH(NOLOCK)
+	ON			a.ID_A = s.ID_A 
+				AND a.in_form_pers_id = s.in_form_pers_id 
+				AND CAST(a.date_start AS DATE) = s.fn_today -- its date start,not fn_today
+	WHERE		a.fn_today >= @30days;
+
+
+--Updating Duration and WOF
+UPDATE POS
+		SET 
+		    POS.Duration = db.Duration,
+		    POS.wof_date = db.wof_date
+		FROM     riskdb.dbo.POS_Apps AS POS WITH(NOLOCK)
+		INNER JOIN     #db AS db ON     POS.ID_D = CAST(db.AccountId AS VARCHAR(50));
+
+
+UPDATE ICL
+		SET 
+		    ICL.Duration = db.Duration,
+		    ICL.wof_date = db.wof_date
+		FROM     Riskdb.dbo.ICL_Apps AS ICL WITH(NOLOCK)
+		INNER JOIN     #db AS db ON     ICL.ID_D = db.AccountId;
+
+
+
+/*
+♦ 7 ♦ 
+Here we finding merchants and updating it in table
+we doing it here because table js_apps_full_interactions
+is filling manually sometimes,so we must take full data of it
+*/		
+
+DROP TABLE IF EXISTS #merchant;
+	SELECT 
+		loanid,
+		appl_dt , 
+		[merchant] = channel 
+INTO  #merchant
+	FROM	(
+				SELECT loanid,appl_dt,channel,
+				       ROW_NUMBER() OVER (PARTITION BY LoanID ORDER BY CampaignSendDate ASC) AS rn
+				FROM db.uzdwh.js_apps_full_interactions (NOLOCK)
+				WHERE channel IS NOT NULL AND loanid IS NOT NULL AND rn_asc_total=1
+			) AS ranked
+	WHERE rn = 1;
+
+
+UPDATE ICL
+		SET     ICL.merchant = m.merchant
+		FROM     Riskdb.dbo.ICL_Apps AS ICL
+		INNER JOIN     #merchant AS m ON     ICL.ID_A = m.loanid;
+
+
+
+			   
+/*
+♦ 8 ♦ 
+Here we calculating offered and appl amount(Its same for POS)
+with complex logic and after that we updating this for POS
+*/	
+
+
+DROP TABLE IF EXISTS #MaxOffered_Downpayment
+	SELECT v.in_form_appl_id,
+		   v.in_form_pers_id,
+		   [calculated_amount] = MAX(v.calculated_amount) 
+		   
+INTO #MaxOffered_Downpayment
+    FROM (
+			 SELECT
+			     sv.in_form_appl_id,
+			     sv.in_form_pers_id,
+			     CASE   WHEN sv.in_application_type_vd = 'ApprLimit' 
+						THEN 	sv.fn_product_max_offered_cred_amnt+
+							 (			SELECT MAX(val) 
+										FROM (
+												VALUES (sv.fn_product_downpayment_price_1ar_01), 
+													   (sv.fn_product_downpayment_price_1ar_02), 
+													   (sv.fn_product_downpayment_price_1ar_03), 
+													   (sv.fn_product_downpayment_price_1ar_04)
+							 ) AS value(val)) 
+					    ELSE 0			     END AS calculated_amount
+			 FROM 	#score_vendoo sv) AS v
+
+	GROUP BY v.in_form_appl_id,
+             v.in_form_pers_id
+   
+   
+DROP TABLE IF EXISTS #max_appl_offered_amt
+			SELECT
+			    sv.in_form_appl_id,
+			    sv.in_form_pers_id,
+			    [max_fn_product_max_offered_cred_amnt]=MAX(sv.fn_product_max_offered_cred_amnt),
+			    [max_in_form_appl_amnt]=MAX(sv.in_form_appl_amnt)  
+				
+INTO #max_appl_offered_amt
+			FROM #score_vendoo sv
+			GROUP BY sv.in_form_appl_id,
+					 sv.in_form_pers_id;
+
+
+DROP TABLE IF EXISTS #last_appl_offered_amt
+			SELECT DISTINCT
+			    srv.in_form_appl_id,
+			    srv.in_form_pers_id,
+			    [last_in_form_appl_amnt] = FIRST_VALUE(srv.in_form_appl_amnt) OVER (PARTITION BY srv.in_form_appl_id ORDER BY srv.date_start DESC) ,
+				[last_fn_product_max_offered_cred_amnt] = FIRST_VALUE(srv.fn_product_max_offered_cred_amnt) OVER (PARTITION BY srv.in_form_appl_id ORDER BY srv.date_start DESC) 
+INTO #last_appl_offered_amt
+			FROM #score_vendoo AS srv;
+
+
+--Finnaly we found all our columns and now we calculate 
+--Our new offere amount and appl_amount
+DROP TABLE IF EXISTS #Result
+			SELECT a.ID_A,
+				   a.fn_final_offered_amnt,
+				   [Offered_amount_new] = CASE 
+			        WHEN modp.calculated_amount != 0 THEN modp.calculated_amount
+			        WHEN laoa.last_fn_product_max_offered_cred_amnt != 0 THEN laoa.last_fn_product_max_offered_cred_amnt
+			        WHEN maoa.max_fn_product_max_offered_cred_amnt != 0 THEN maoa.max_fn_product_max_offered_cred_amnt
+			        WHEN maoa.max_in_form_appl_amnt != 0 THEN maoa.max_in_form_appl_amnt
+			        WHEN laoa.last_in_form_appl_amnt != 0 THEN laoa.last_in_form_appl_amnt
+			        ELSE NULL			    END  
+INTO #Result
+			FROM riskdb.dbo.POS_Apps AS a
+			LEFT JOIN #MaxOffered_Downpayment AS modp ON a.ID_A = modp.in_form_appl_id
+			LEFT JOIN #max_appl_offered_amt AS maoa ON a.ID_A = maoa.in_form_appl_id
+			LEFT JOIN #last_appl_offered_amt AS laoa ON a.ID_A = laoa.in_form_appl_id
+			WHERE a.fn_today >= @30days;
+
+--Just updating it 
+UPDATE P
+SET 
+    P.fn_final_offered_amnt = CASE WHEN P.fn_final_result = 1 THEN R.Offered_amount_new ELSE P.fn_final_offered_amnt END,
+    P.in_form_appl_amnt = R.Offered_amount_new
+FROM riskdb.dbo.POS_Apps P
+INNER JOIN #Result R ON P.ID_A = R.ID_A;
+
+
+
+
+DECLARE @EndTime DATETIME = GETDATE();
+DECLARE @DurationSeconds INT = DATEDIFF(SECOND, @StartTime, @EndTime);
+DECLARE @DurationFormatted VARCHAR(8) = CONVERT(VARCHAR(8), DATEADD(SECOND, @DurationSeconds, 0), 108);
+
+UPDATE RiskDB.system.TableUpdateLog
+SET EndTime = @EndTime,
+	Duration = @DurationSeconds,
+	DurationFormatted = @DurationFormatted,
+	Status = 'Updated'
+WHERE RunID = @RunID;
+
+
+
+
+DROP TABLE  #ICL
+DROP TABLE  #payment
+DROP TABLE  #borrower
+DROP TABLE  #db
+DROP TABLE  #score_vendoo
+DROP TABLE  #Ranked_Vendoo
+DROP TABLE  #merchant
+DROP TABLE  #MaxOffered_Downpayment
+DROP TABLE  #max_appl_offered_amt
+DROP TABLE  #last_appl_offered_amt
+DROP TABLE  #Result
+
+END
+GO
+
+
