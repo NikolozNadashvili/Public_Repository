@@ -1,0 +1,79 @@
+USE [RiskDB]
+GO
+
+/****** Object:  StoredProcedure [dbo].[sp_litigation_NN]    Script Date: 11/12/2024 6:06:55 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+ALTER  PROCEDURE --EXEC
+[dbo].[sp_litigation_NN]
+
+AS
+BEGIN
+-- =============================================
+-- Procedure: sp_litigation_NN
+-- Last Update Date:  2024/10/16
+-- Last Updated by : Nikoloz Nadashvili
+-- AVG run time for last 10 days  : <1 min
+/*  Description: 
+We use this procedure to insert in litigation table
+new loans for all products which are on litigation
+*/
+
+DECLARE @RunID INT;
+DECLARE @StartTime DATETIME = GETDATE();
+
+INSERT INTO RiskDB.system.TableUpdateLog (ProcedureName, TableName, StartTime, Status, LogDate)
+VALUES ('[dbo].[sp_litigation_NN]', 'riskdb.dbo.litigations_agg', @StartTime, 'In Progress', CAST(GETDATE() AS DATE));
+
+SET @RunID = SCOPE_IDENTITY();
+
+
+
+DECLARE @litdate AS DATE = DATEADD(DAY,-3,GETDATE())
+
+
+INSERT INTO riskdb.dbo.litigations_agg
+SELECT
+		  [Loan_id] = CAST(v2.loan_id AS NVARCHAR(25)),
+		  [date_litigation] =v2.date_litigation,
+		  [Product] = v2.loan_type
+	
+FROM db.uzdwh.loan_portfolio_agg_merge AS v2 
+WHERE v2.date_litigation IS NOT NULL
+AND NOT EXISTS (SELECT 1 FROM riskdb.dbo.litigations_agg AS a WHERE a.Loan_id = CAST(v2.loan_id AS NVARCHAR(25)))
+AND v2.calc_day >= @litdate
+
+  UNION
+  
+SELECT	   [Loan_id] =  v.installment_id
+		  ,[date_litigation] = MIN(CAST(v.calculation_date AS DATE))
+		  ,[Product] = 'TFS'
+FROM RiskDB.dbo.vwInstallmentSnapshots AS v
+WHERE v.submitted_to_court = 1  
+AND NOT EXISTS (SELECT 1 FROM riskdb.dbo.litigations_agg AS a WHERE a.Loan_id = v.installment_id)
+AND v.calculation_date >= @litdate
+GROUP BY v.installment_id
+
+
+DECLARE @EndTime DATETIME = GETDATE();
+DECLARE @DurationSeconds INT = DATEDIFF(SECOND, @StartTime, @EndTime);
+DECLARE @DurationFormatted VARCHAR(8) = CONVERT(VARCHAR(8), DATEADD(SECOND, @DurationSeconds, 0), 108);
+
+UPDATE RiskDB.system.TableUpdateLog
+SET EndTime = @EndTime,
+	Duration = @DurationSeconds,
+	DurationFormatted = @DurationFormatted,
+	Status = 'Updated'
+WHERE RunID = @RunID;
+
+END
+
+GO
+
+
