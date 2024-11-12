@@ -1,0 +1,163 @@
+USE [RiskDB]
+GO
+
+/****** Object:  StoredProcedure [dbo].[sp_ClientStatus]    Script Date: 11/12/2024 6:05:26 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ALTER PROCEDURE [dbo].[sp_ClientStatus]
+	@today DATE
+AS
+BEGIN
+-- =============================================
+-- Procedure: sp_ClientStatus
+-- Last Update Date:  2024/10/15
+-- Last Updated by : Nikoloz Nadashvili
+-- AVG run time for last 10 days  : <2 min
+/*  Description: 
+We use this procedure to create table with IDs and 
+days which calculate how much this client was active in our bank before
+he fill for applications */
+
+-- AVG run time for full script : Some hours. here we must use cycle
+-- i will write cycle below for example:
+/*	DECLARE @input DATE 
+	SET @input = '2022-28-25'
+	 
+	DECLARE @goal DATE 
+	SET @goal = '2023-01-01'
+	 
+	 
+	WHILE @input <= @goal 
+	BEGIN
+	    EXEC riskdb.test.sp_ClientStatus_ss @today = @input
+	    SET @input = DATEADD(DAY, 1, @input)
+	END
+	 
+	SELECT 'Done' */
+-- =============================================
+
+
+--Удаляем тот день который заливаем
+DELETE FROM riskdb.dbo.ClientStatus6m_simultaneous WHERE fn_today = @today ;
+
+-- создаем все возможные даты когда у нас есть калк дейт
+-- делаем для того что бы исключить дни когда банк не работал
+DROP TABLE IF EXISTS #dates ;
+
+SELECT		DISTINCT ISNULL(cd.calculationdate, ins.calculation_date)  AS Hist_Date
+INTO		#dates
+FROM		DB.space.CloseDayLogs CD  WITH(NOLOCK)
+FULL JOIN	DB.vendoo.installment_closedaylogs ins WITH(NOLOCK)
+ON			ins.[calculation_date]= cd.[CalculationDate]  
+WHERE		ISNULL(cd.calculationdate, ins.calculation_date) <= @today ;
+
+
+--Создаём аппы для поса и исл
+DROP TABLE IF EXISTS #Apps;
+SELECT		ID_A,
+			ID_D,
+			s.in_form_pers_id,
+			s.fn_today,
+			[date_start] = s.fn_today
+INTO		#Apps				
+FROM		RiskDB.dbo.ICL_Apps AS s
+WHERE		fn_today = @today;
+
+INSERT INTO	#Apps
+SELECT		ID_A,
+			ID_D,
+			sv.in_form_pers_id AS in_form_pers_id,
+			sv.fn_today,
+			MAX(sv.date_start) AS date_start
+FROM		RiskDB.dbo.POS_Apps sv WITH(NOLOCK)
+WHERE		CAST(sv.date_start AS DATE) = @today 
+GROUP BY sv.ID_A, sv.ID_D, sv.in_form_pers_id, sv.fn_today
+	
+	
+
+
+-- Создаем снепшотовские данные
+
+DROP TABLE IF EXISTS #Snapshots ;
+SELECT			CAST(ls.AccountId AS VARCHAR(50)) AS AccountID, 
+				ls.CustomerPersonalNumber, 
+				MIN(ls.ActivationDate) [Start_Date], 
+				ISNULL(MAX(ls.ClosedDate), @today) AS [End_date]
+INTO			#Snapshots
+FROM			db.calc.LoanSnapshotsMerged AS ls (NOLOCK)
+WHERE			ls.ActivationDate IS NOT NULL
+				AND EXISTS (SELECT 1 FROM #Apps AS p WHERE p.in_form_pers_id = ls.CustomerPersonalNumber)
+GROUP BY		ls.AccountId, ls.CustomerPersonalNumber;
+
+
+INSERT	INTO	#Snapshots
+SELECT			ins.appl_id AS appl_id,
+				COALESCE(sv.in_form_pers_id,ins.pinfl),
+				MIN(ins.disbursement_date) [Start_Date],
+				ISNULL(MAX(ins.calculation_date), @today) [End_Date]
+FROM			db.vendoo.INSTALLMENT_SNAPSHOTS_MERGED AS ins WITH(NOLOCK)
+LEFT JOIN		#Apps AS sv ON sv.ID_D = ins.appl_id 
+WHERE			ins.disbursement_date IS NOT NULL AND ISNULL(ins.delete_mark,0) = 0
+				AND EXISTS (SELECT 1 FROM #Apps AS p WHERE p.in_form_pers_id = ins.pinfl)
+GROUP BY		ins.appl_id,
+				COALESCE(sv.in_form_pers_id,ins.pinfl);
+
+
+--Тут начинается магия где мы ищем для каждого клиента каждый его активный день(снепшот)
+--Важный момент - мы не считаем со старт дейта и энд дейта дифференс,мы считаем кол-во калк дней
+DROP TABLE IF EXISTS #base;
+SELECT
+    d.HIST_DATE AS Date
+  , t.CustomerPersonalNumber AS in_form_pers_id
+  , 1 AS Count
+INTO
+    #base
+FROM    #dates AS d
+INNER JOIN #Snapshots AS t ON t.Start_Date <= d.Hist_Date AND   d.Hist_Date <= t.End_date
+GROUP BY d.HIST_DATE
+		,t.CustomerPersonalNumber;
+
+
+
+DROP TABLE IF EXISTS #tmp;
+SELECT
+    CAST ( a.date_start AS DATE ) AS [fn_today]
+  , a.ID_A
+  , a.in_form_pers_id
+  , ISNULL ( SUM ( b.Count ), 0 ) AS Days
+INTO
+    #tmp
+FROM    #Apps AS a
+ LEFT JOIN #base AS b ON b.in_form_pers_id = a.in_form_pers_id AND  b.Date < CAST ( a.date_start AS DATE )
+GROUP BY CAST ( a.date_start AS DATE )
+  , a.ID_A
+  , a.in_form_pers_id;
+
+
+  --Заливаем в таблицу
+INSERT INTO riskdb.dbo.ClientStatus6m_simultaneous
+SELECT * FROM #tmp WHERE ID_A IS NOT NULL
+;
+
+END
+
+GO
+
+
