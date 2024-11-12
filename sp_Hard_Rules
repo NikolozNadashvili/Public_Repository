@@ -1,0 +1,719 @@
+USE [RiskDB]
+GO
+
+/****** Object:  StoredProcedure [dbo].[sp_Hard_Rules]    Script Date: 11/12/2024 6:06:12 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+ALTER PROCEDURE --exec
+[dbo].[sp_Hard_Rules]
+AS
+BEGIN
+
+-- =============================================
+-- Procedure: Riskdb.dbo.sp_Hard_Rules2
+-- Created By: Nikoloz Nadashvili
+-- Created Date: 2024/10/04
+-- Last Script Update Date: -
+-- AVG run time : 1 min
+-- Description: This procedure creates table with full info about HR for each wings_id (Only ICL Product)
+-- =============================================
+
+-- ========== Примечание к таблице : Добавить группы ==========
+-- Думаю было бы круто добавить группу ХР,что бы эта таблица была еще удобней
+
+-- ========== Описание Блока: готовим к инкрементал рефрешу ==========
+-- т.к эта инфа статична не надо селектить всю таблицу,делаем инкр.рефреш
+
+DECLARE @RunID INT;
+DECLARE @StartTime DATETIME = GETDATE();
+
+INSERT INTO RiskDB.system.TableUpdateLog (ProcedureName, TableName, StartTime, Status, LogDate)
+VALUES ('sp_Hard_Rules', 'Views of hard Rules', @StartTime, 'In Progress', CAST(GETDATE() AS DATE));
+
+SET @RunID = SCOPE_IDENTITY();
+
+DECLARE @date_start DATE;
+DECLARE @date_end DATE;
+SET @date_start = DATEADD(DAY,-10,GETDATE());
+
+--SET @date_start = DATEADD(DAY,-3,GETDATE())
+SET @date_end = GETDATE ( );
+
+
+
+DROP TABLE IF EXISTS #Hard_Rule_Priority;
+DROP TABLE IF EXISTS #HR_All_Rules;;
+DROP TABLE IF EXISTS #Single_HR;
+
+-- ========== Описание Блока: Находим приоритетный ХР==========
+-- после августа 2024 это колонка,до августа это скрипт
+DROP TABLE IF EXISTS #Hard_Rule_Priority;
+SELECT
+    a.fn_today
+  , a.wings_id
+  , fn_triggered_hard_rules  
+  ,[fn_final_result]  = ISNULL(a.fn_final_result,0)
+  ,a.fn_high_segment
+  ,fn_repeated_client
+  ,[fn_tbc_add_loan_indicator] = ISNULL(a.fn_tbc_add_loan_indicator,0)
+  ,[fn_cr_segment_indicator] = ISNULL(a.fn_cr_segment_indicator,0)
+  ,[fn_add_loan_behavioural_indic] = ISNULL(a.fn_add_loan_behavioural_indic,0)
+
+  , CASE WHEN fn_today < '20240801' THEN (CASE WHEN a.FN_HARD_RULE_REJECT = 1 AND   a.FN_HR_PAR_APPL_DURING_BAAS = 1 THEN 'FN_HR_PAR_APPL_DURING_BAAS'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_ADD_LOAN_DATES_DIFF_LOAN_HR = 1 THEN 'FN_ADD_LOAN_DATES_DIFF_LOAN_HR'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_TBC_PARALLEL_APPLICATION = 1 THEN 'FN_HR_TBC_PARALLEL_APPLICATION'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_MULTI_ADD_LOAN_HR = 1 THEN 'FN_MULTI_ADD_LOAN_HR'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_ADD_LOAN_ISSUE_CHECK = 1 THEN 'FN_ADD_LOAN_ISSUE_CHECK'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_NO_KATM_REP_REJ_COND_RATE = 1 THEN 'FN_NO_KATM_REP_REJ_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start >= '2024-06-03 16:02:37.2840000') OR  (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL)) AND a.FN_HR_NO_MIB_REPORT = 1 AND   a.date_start < '2024-06-21 12:05:30.7460000' THEN 'FN_HR_NO_MIB_REPORT'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_KATM_REP_DAY_HR = 1 THEN 'FN_KATM_REP_DAY_HR'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_DWH_OVRD_ERROR = 1 THEN 'FN_HR_DWH_OVRD_ERROR'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_PSPRT_EXP_COND_RATE = 1 THEN 'FN_PSPRT_EXP_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_KATM_NEW_PINFL_VALIDATION = 1 THEN 'FN_HR_KATM_NEW_PINFL_VALIDATION'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_PASSPORT_SERIES_HR = 1 THEN 'FN_PASSPORT_SERIES_HR'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_CONSOLIDATED_LOAN = 1 THEN 'FN_HR_CONSOLIDATED_LOAN'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_HR_CASE_FOR_ADD_LOAN = 1 THEN 'FN_HR_CASE_FOR_ADD_LOAN'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_HR_REGION_BLOCK = 1 THEN 'FN_HR_REGION_BLOCK'
+                                              WHEN FN_CR_SEGMENT_INDICATOR = 1 AND  a.FN_TOTAL_PRINCIPAL_OUTSTANDING_SUM > (16500000 - 300000) THEN 'FN_50BPV_LIMIT_CR' --old CR_CREDIT_LIMIT_AMOUNT
+                                              WHEN FN_CR_SEGMENT_INDICATOR = 1 AND  a.FN_CASH_CLI_LIMIT_FINAL_CR <= 0 THEN 'fn_limit_rej_ind' --old FN_CASH_CLI_LIMIT_FINAL_CR_REJ
+                                              WHEN a.tech_rej_ind = 1 THEN 'fn_tech_rej_ind'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.fn_high_segment = 'D') AND a.FN_CLI_YOUNG_AGE_COND_RATE = 1 THEN 'FN_CLI_YOUNG_AGE_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.fn_high_segment = 'D') AND a.FN_CLI_AGE_GENDER_COND_RATE = 1 THEN 'FN_CLI_AGE_GENDER_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_CLIENT_AGE_COND_RATE = 1 THEN 'FN_CLIENT_AGE_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_BL_CLIENT_COND_RATE = 1 THEN 'FN_BL_CLIENT_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_BL_COMPANY_HR = 1 THEN 'FN_BL_COMPANY_HR'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_REJECT_TIN = 1 THEN 'FN_HR_REJECT_TIN'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_BLOCKED_ACCOUNTS_COND_RATE = 1 THEN 'FN_BLOCKED_ACCOUNTS_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_MOB_NUMBER_ONE_CLIENT = 1 THEN 'FN_MOB_NUMBER_ONE_CLIENT'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_NEW_ANTIFRAUD_SCORE = 1 THEN 'FN_HR_NEW_ANTIFRAUD_SCORE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.RL_MINZDRAV_NARKO_STATUS = 1 THEN 'RL_MINZDRAV_NARKO_STATUS'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.RL_MINZDRAV_PSYCHO_STATUS = 1 THEN 'RL_MINZDRAV_PSYCHO_STATUS'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_CUR_OVRD_AMNT_REJ_COND_RATE = 1 THEN 'FN_CUR_OVRD_AMNT_REJ_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_MIB_DEBT_ALL_HR = 1 THEN 'FN_MIB_DEBT_ALL_HR'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_KATM_BAD_DEBT_HR = 1 THEN 'FN_KATM_BAD_DEBT_HR'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2024-05-27 11:04:44.9710000') OR (a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2024-05-27 11:04:44.9710000'))) AND a.FN_MAX_OVERDUES_TBC_COND_RATE = 1 THEN 'FN_MAX_OVERDUES_TBC_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR = 1 OR  a.fn_high_segment = 'D') AND a.FN_KATM_INQ_1MON_COND_RATE = 1 THEN 'FN_KATM_INQ_1MON_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.fn_high_segment = 'D') AND a.FN_LAST_3_MONTH_DPD_COND_RATE = 1 THEN 'FN_LAST_3_MONTH_DPD_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.fn_high_segment = 'D') AND a.FN_LAST_12_MONTH_DPD_COND_RATE = 1 THEN 'FN_LAST_12_MONTH_DPD_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.fn_high_segment = 'D') AND a.FN_LAST_24_MONTH_DPD_COND_RATE = 1 THEN 'FN_LAST_24_MONTH_DPD_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.fn_high_segment = 'D') AND a.FN_HR_KATM_NEW_MAX_DPD_L3M = 1 THEN 'FN_HR_KATM_NEW_MAX_DPD_L3M'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.fn_high_segment = 'D') AND a.FN_HR_KATM_NEW_MAX_DPD_L12M = 1 THEN 'FN_HR_KATM_NEW_MAX_DPD_L12M'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.fn_high_segment = 'D') AND a.FN_HR_KATM_NEW_MAX_DPD_L24M = 1 THEN 'FN_HR_KATM_NEW_MAX_DPD_L24M'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.fn_high_segment = 'D') AND a.FN_CNT_ACT_KATM_CONTR_COND_RATE = 1 THEN 'FN_CNT_ACT_KATM_CONTR_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_LOMBARD_HR = 1 THEN 'FN_LOMBARD_HR'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.fn_high_segment = 'D' OR ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2024-02-12 17:24:38.9840000') OR   (a.FN_CR_SEGMENT_INDICATOR = 1 AND  a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2024-02-12 17:24:38.9840000'))) AND a.FN_APP_1D_COUNTER_COND_RATE = 1 THEN 'FN_APP_1D_COUNTER_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_APP_7D_COUNTER_COND_RATE = 1 THEN 'FN_APP_7D_COUNTER_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_REJ_APPL_30D_COND_RATE = 1 THEN 'FN_HR_REJ_APPL_30D_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_HR_ADD_LOAN_AFTER_CR = 1 THEN 'FN_HR_ADD_LOAN_AFTER_CR'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_HR_ADD_LOAN_DISTRIBUTION = 1 AND   a.date_start > '2024-07-03 13:13' THEN 'FN_HR_ADD_LOAN_DISTRIBUTION'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_TAX_PINFL_VALIDATION = 1 THEN 'FN_HR_TAX_PINFL_VALIDATION'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_XALQ_PINFL_VALIDATION = 1 THEN 'FN_HR_XALQ_PINFL_VALIDATION'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_INPS_PINFL_VALIDATION = 1 THEN 'FN_HR_INPS_PINFL_VALIDATION'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_LOAN_CNT_BY_TIN_ERROR = 1 THEN 'FN_HR_LOAN_CNT_BY_TIN_ERROR'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_TAX_NEW_LAST_7D_REP_CNT = 1 THEN 'FN_HR_TAX_NEW_LAST_7D_REP_CNT'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_TAX_NEW_LAST_30D_REP_CNT = 1 THEN 'FN_HR_TAX_NEW_LAST_30D_REP_CNT'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_TAX_NEW_LAST_90D_REP_CNT = 1 THEN 'FN_HR_TAX_NEW_LAST_90D_REP_CNT'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_MIN_INC_REQ_COND_RATE = 1 THEN 'FN_MIN_INC_REQ_COND_RATE'
+                                              WHEN a.pti_rej_ind = 1 THEN 'fn_pti_rej_ind'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_HR_REJ_SEGM = 1 THEN 'FN_HR_REJ_SEGM'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_CASH_SCORING_GROUP_HR = 1 THEN 'FN_CASH_SCORING_GROUP_HR'
+                                              WHEN a.limit_rej_ind = 1 THEN 'fn_limit_rej_ind'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_HR_ADD_LOAN_DISTRIBUTION = 1 AND   a.date_start > '2024-06-19 15:40' THEN 'FN_HR_ADD_LOAN_DISTRIBUTION'
+                                              WHEN a.fn_hr_npv_less_than_calib_pd = 1 THEN 'fn_hr_npv_less_than_calib_pd'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_UNDERWRITER_DEC = 1 THEN 'FN_UNDERWRITER_DEC'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_KATM_PASS_VALIDATION = 1 THEN 'FN_HR_KATM_PASS_VALIDATION'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_MAX_OVERDUES_TBC_COND_RATE = 1 THEN 'FN_MAX_OVERDUES_TBC_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_APP_7D_COUNTER_COND_RATE = 1 THEN 'FN_APP_7D_COUNTER_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_CR_SEGMENT_INDICATOR = 1 AND  a.FN_HR_CR_D_DGTL_CARD = 1 THEN 'FN_HR_CR_D_DGTL_CARD'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_CR_SEGMENT_INDICATOR = 1 AND  a.FN_HR_UCELL_D_SEG = 1 THEN 'FN_HR_UCELL_D_SEG'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_CLI_YOUNG_AGE_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_CLI_YOUNG_AGE_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_CLI_AGE_GENDER_COND_RATE = 1 AND   a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_CLI_AGE_GENDER_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2023-10-25 16:09:39.8310000') OR (a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2023-10-25 16:09:39.8310000'))) AND a.FN_CLIENT_AGE_COND_RATE = 1 AND  a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_CLIENT_AGE_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR = 1 OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_KATM_INQ_1MON_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_KATM_INQ_1MON_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_LAST_3_MONTH_DPD_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_LAST_3_MONTH_DPD_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_LAST_12_MONTH_DPD_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_LAST_12_MONTH_DPD_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_LAST_24_MONTH_DPD_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_LAST_24_MONTH_DPD_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_HR_KATM_NEW_MAX_DPD_L3M = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_HR_KATM_NEW_MAX_DPD_L3M'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_HR_KATM_NEW_MAX_DPD_L12M = 1 AND   a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_HR_KATM_NEW_MAX_DPD_L12M'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_HR_KATM_NEW_MAX_DPD_L24M = 1 AND   a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_HR_KATM_NEW_MAX_DPD_L24M'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_CNT_ACT_KATM_CONTR_COND_RATE = 1 AND   a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_CNT_ACT_KATM_CONTR_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2023-10-25 16:09:39.8310000') OR (a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2023-10-25 16:09:39.8310000'))) AND a.FN_LOMBARD_HR = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_LOMBARD_HR'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2024-02-12 17:24:38.9840000') OR (a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2024-02-12 17:24:38.9840000'))) AND a.FN_APP_1D_COUNTER_COND_RATE = 1 AND  a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_APP_1D_COUNTER_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2024-03-27 07:04:12.7970000') OR (a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2024-03-27 07:04:12.7970000'))) AND a.FN_APP_7D_COUNTER_COND_RATE = 1 AND  a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_APP_7D_COUNTER_COND_RATE'
+                                              WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2023-10-25 16:09:39.8310000') OR (a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2023-10-25 16:09:39.8310000'))) AND a.FN_MIN_INC_REQ_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 'FN_MIN_INC_REQ_COND_RATE'
+                                              ELSE 'Without_HR'
+                                          END)
+        ELSE  FN_REJECTION_REASON_NAME
+    END AS Priority_Hard_rule
+  , [Priority_data_flag] = CASE WHEN a.fn_today < '20240801' THEN 'From_Script'
+                               ELSE  'From_score_column'
+                           END
+INTO
+    #Hard_Rule_Priority
+FROM    DB.wings.score_icl AS a WITH(NOLOCK)
+WHERE   a.fn_today >= @date_start AND   a.fn_today < @date_end
+AND ISNULL(a.fn_final_result,0) != 2
+AND     ISNULL(a.IN_IS_PRE_APPROVED_DISBURSE, 0) =0
+AND     ISNULL(a.IN_IS_PRE_APPROVED, 0) =0
+;
+
+
+
+
+
+
+
+
+
+-- ========== Описание Блока: Находим все хард рулы для вингс айди  ==========
+-- тут мы кейсвеном находим все хард рулы которые сработали на 
+--после августа 24 мы использует колонку тригера,до августа мы высчитываем вручную скриптом
+DROP TABLE IF EXISTS #HR_All_Rules;
+SELECT
+    a.fn_today
+  , a.wings_id
+  , [FN_HR_PAR_APPL_DURING_BAAS] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_HR_PAR_APPL_DURING_BAAS%' THEN 1
+                                       WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   a.FN_HR_PAR_APPL_DURING_BAAS = 1 THEN 1
+                                       ELSE 0
+                                   END
+  , [FN_ADD_LOAN_DATES_DIFF_LOAN_HR] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_ADD_LOAN_DATES_DIFF_LOAN_HR%' THEN 1
+                                           WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_ADD_LOAN_DATES_DIFF_LOAN_HR = 1 THEN 1
+                                           ELSE 0
+                                       END
+  , [FN_HR_TBC_PARALLEL_APPLICATION] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_HR_TBC_PARALLEL_APPLICATION%' THEN 1
+                                           WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   a.FN_HR_TBC_PARALLEL_APPLICATION = 1 THEN 1
+                                           ELSE 0
+                                       END
+  , [FN_MULTI_ADD_LOAN_HR] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_MULTI_ADD_LOAN_HR%' THEN 1
+                                 WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.FN_MULTI_ADD_LOAN_HR = 1 THEN 1
+                                 ELSE 0
+                             END
+  , [FN_ADD_LOAN_ISSUE_CHECK] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_ADD_LOAN_ISSUE_CHECK%' THEN 1
+                                    WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  a.FN_ADD_LOAN_ISSUE_CHECK = 1 THEN 1
+                                    ELSE 0
+                                END
+  , [FN_NO_KATM_REP_REJ_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_NO_KATM_REP_REJ_COND_RATE%' THEN 1
+                                         WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.FN_NO_KATM_REP_REJ_COND_RATE = 1 THEN 1
+                                         ELSE 0
+                                     END
+  , [FN_HR_NO_MIB_REPORT] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_HR_NO_MIB_REPORT%' THEN 1
+                                WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start >= '2024-06-03 16:02:37.2840000') OR   (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL)) AND a.FN_HR_NO_MIB_REPORT = 1 AND   a.date_start < '2024-06-21 12:05:30.7460000' THEN 1
+                                ELSE 0
+                            END
+  , [FN_KATM_REP_DAY_HR] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_KATM_REP_DAY_HR%' THEN 1
+                               WHEN a.fn_today < '20240801' AND  a.FN_HARD_RULE_REJECT = 1 AND   a.FN_KATM_REP_DAY_HR = 1 THEN 1
+                               ELSE 0
+                           END
+  , [FN_HR_DWH_OVRD_ERROR] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_HR_DWH_OVRD_ERROR%' THEN 1
+                                 WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_DWH_OVRD_ERROR = 1 THEN 1
+                                 ELSE 0
+                             END
+  , [FN_PSPRT_EXP_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_PSPRT_EXP_COND_RATE%' THEN 1
+                                   WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   a.FN_PSPRT_EXP_COND_RATE = 1 THEN 1
+                                   ELSE 0
+                               END
+  , [FN_HR_KATM_NEW_PINFL_VALIDATION] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_HR_KATM_NEW_PINFL_VALIDATION%' THEN 1
+                                            WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  a.FN_HR_KATM_NEW_PINFL_VALIDATION = 1 THEN 1
+                                            ELSE 0
+                                        END
+  , [FN_PASSPORT_SERIES_HR] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_PASSPORT_SERIES_HR%' THEN 1
+                                  WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.FN_PASSPORT_SERIES_HR = 1 THEN 1
+                                  ELSE 0
+                              END
+  , [FN_HR_CONSOLIDATED_LOAN] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_HR_CONSOLIDATED_LOAN%' THEN 1
+                                    WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  a.FN_HR_CONSOLIDATED_LOAN = 1 THEN 1
+                                    ELSE 0
+                                END
+  , [FN_HR_CASE_FOR_ADD_LOAN] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_HR_CASE_FOR_ADD_LOAN%' THEN 1
+                                    WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_HR_CASE_FOR_ADD_LOAN = 1 THEN 1
+                                    ELSE 0
+                                END
+  , [FN_HR_REGION_BLOCK] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_HR_REGION_BLOCK%' THEN 1
+                               WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_HR_REGION_BLOCK = 1 THEN 1
+                               ELSE 0
+                           END
+  , [FN_50BPV_LIMIT_CR] =     CASE WHEN a.fn_today >= '20240801' AND  a.FN_50BPV_LIMIT_CR = 1 THEN 1
+                                   WHEN a.fn_today < '20240801' AND FN_CR_SEGMENT_INDICATOR = 1 AND a.FN_TOTAL_PRINCIPAL_OUTSTANDING_SUM > (16500000 - 300000) THEN 1
+                                   ELSE 0
+                               END --OLD CR_CREDIT_LIMIT_AMOUNT
+  , [FN_LIMIT_REJ_IND] = CASE WHEN a.fn_today >= '20240801' AND   a.FN_LIMIT_REJ_IND = 1 THEN 1
+                              WHEN a.fn_today < '20240801' AND  FN_CR_SEGMENT_INDICATOR = 1 AND a.FN_CASH_CLI_LIMIT_FINAL_CR <= 0 THEN 1
+							  WHEN a.fn_today < '20240801' and a.limit_rej_ind = 1 THEN 1
+                              ELSE 0
+                          END -- OLD [FN_CASH_CLI_LIMIT_FINAL_CR_REJ]
+  , [fn_tech_rej_ind] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_tech_rej_ind = 1 THEN 1
+						 WHEN a.fn_today < '20240801' AND   a.tech_rej_ind = 1 THEN 1
+                         ELSE 0
+                     END  --OLD TECH_REJ_IND
+  , [FN_CLI_YOUNG_AGE_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_CLI_YOUNG_AGE_COND_RATE%' THEN 1
+                                       WHEN a.fn_today < '20240801' AND  a.FN_HARD_RULE_REJECT = 1 AND   ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.fn_high_segment = 'D') AND a.FN_CLI_YOUNG_AGE_COND_RATE = 1 THEN 1
+                                       WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_CLI_YOUNG_AGE_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                       ELSE 0
+                                   END
+  , [FN_CLI_AGE_GENDER_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_CLI_AGE_GENDER_COND_RATE%' THEN 1
+                                        WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.fn_high_segment = 'D') AND a.FN_CLI_AGE_GENDER_COND_RATE = 1 THEN 1
+                                        WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_CLI_AGE_GENDER_COND_RATE = 1 AND   a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                        ELSE 0
+                                    END
+  , [FN_CLIENT_AGE_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_CLIENT_AGE_COND_RATE%' THEN 1
+                                    WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_CLIENT_AGE_COND_RATE = 1 THEN 1
+                                    WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  (a.FN_CR_SEGMENT_INDICATOR != 1 OR  ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2023-10-25 16:09:39.8310000') OR (a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2023-10-25 16:09:39.8310000'))) AND a.FN_CLIENT_AGE_COND_RATE = 1 AND  a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                    ELSE 0
+                                END
+  , [FN_BL_CLIENT_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_BL_CLIENT_COND_RATE%' THEN 1
+                                   WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   a.FN_BL_CLIENT_COND_RATE = 1 THEN 1
+                                   ELSE 0
+                               END
+  , [FN_BL_COMPANY_HR] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_BL_COMPANY_HR%' THEN 1
+                             WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.FN_BL_COMPANY_HR = 1 THEN 1
+                             ELSE 0
+                         END
+  , [FN_HR_REJECT_TIN] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_HR_REJECT_TIN%' THEN 1
+                             WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_REJECT_TIN = 1 THEN 1
+                             ELSE 0
+                         END
+  , [FN_BLOCKED_ACCOUNTS_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_BLOCKED_ACCOUNTS_COND_RATE%' THEN 1
+                                          WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.FN_BLOCKED_ACCOUNTS_COND_RATE = 1 THEN 1
+                                          ELSE 0
+                                      END
+  , [FN_MOB_NUMBER_ONE_CLIENT] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_MOB_NUMBER_ONE_CLIENT%' THEN 1
+                                     WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.FN_MOB_NUMBER_ONE_CLIENT = 1 THEN 1
+                                     ELSE 0
+                                 END
+  , [FN_HR_NEW_ANTIFRAUD_SCORE] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_HR_NEW_ANTIFRAUD_SCORE%' THEN 1
+                                      WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_NEW_ANTIFRAUD_SCORE = 1 THEN 1
+                                      ELSE 0
+                                  END
+  , [RL_MINZDRAV_NARKO_STATUS] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%RL_MINZDRAV_NARKO_STATUS%' THEN 1
+                                     WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.RL_MINZDRAV_NARKO_STATUS = 1 THEN 1
+                                     ELSE 0
+                                 END
+  , [RL_MINZDRAV_PSYCHO_STATUS] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%RL_MINZDRAV_PSYCHO_STATUS%' THEN 1
+                                      WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.RL_MINZDRAV_PSYCHO_STATUS = 1 THEN 1
+                                      ELSE 0
+                                  END
+  , [FN_CUR_OVRD_AMNT_REJ_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_CUR_OVRD_AMNT_REJ_COND_RATE%' THEN 1
+                                           WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   a.FN_CUR_OVRD_AMNT_REJ_COND_RATE = 1 THEN 1
+                                           ELSE 0
+                                       END
+  , [FN_MIB_DEBT_ALL_HR] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_MIB_DEBT_ALL_HR%' THEN 1
+                               WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   a.FN_MIB_DEBT_ALL_HR = 1 THEN 1
+                               ELSE 0
+                           END
+  , [FN_KATM_BAD_DEBT_HR] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_KATM_BAD_DEBT_HR%' THEN 1
+                                WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  a.FN_KATM_BAD_DEBT_HR = 1 THEN 1
+                                ELSE 0
+                            END
+  , [FN_MAX_OVERDUES_TBC_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_MAX_OVERDUES_TBC_COND_RATE%' THEN 1
+                                          WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2024-05-27 11:04:44.9710000') OR (a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2024-05-27 11:04:44.9710000'))) AND a.FN_MAX_OVERDUES_TBC_COND_RATE = 1 THEN 1
+                                          WHEN  a.fn_today < '20240801' AND  (CASE WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_MAX_OVERDUES_TBC_COND_RATE = 1 THEN 1
+                                                    ELSE  0
+                                                END) = 1 THEN 1
+                                          ELSE 0
+                                      END
+  , [FN_KATM_INQ_1MON_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_KATM_INQ_1MON_COND_RATE%' THEN 1
+                                       WHEN  a.fn_today < '20240801' AND  a.FN_HARD_RULE_REJECT = 1 AND   (a.FN_CR_SEGMENT_INDICATOR = 1 OR   a.fn_high_segment = 'D') AND a.FN_KATM_INQ_1MON_COND_RATE = 1 THEN 1
+                                       WHEN  a.fn_today < '20240801' AND  a.FN_HARD_RULE_REJECT = 1 AND   (a.FN_CR_SEGMENT_INDICATOR = 1 OR   a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_KATM_INQ_1MON_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                       ELSE 0
+                                   END
+  , [FN_LAST_3_MONTH_DPD_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_LAST_3_MONTH_DPD_COND_RATE%' THEN 1
+                                          WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.fn_high_segment = 'D') AND a.FN_LAST_3_MONTH_DPD_COND_RATE = 1 THEN 1
+                                          WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_LAST_3_MONTH_DPD_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                          ELSE 0
+                                      END
+  , [FN_LAST_12_MONTH_DPD_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_LAST_12_MONTH_DPD_COND_RATE%' THEN 1
+                                           WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.fn_high_segment = 'D') AND a.FN_LAST_12_MONTH_DPD_COND_RATE = 1 THEN 1
+                                           WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_LAST_12_MONTH_DPD_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                           ELSE 0
+                                       END
+  , [FN_LAST_24_MONTH_DPD_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_LAST_24_MONTH_DPD_COND_RATE%' THEN 1
+                                           WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.fn_high_segment = 'D') AND a.FN_LAST_24_MONTH_DPD_COND_RATE = 1 THEN 1
+                                           WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_LAST_24_MONTH_DPD_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                           ELSE 0
+                                       END
+  , [FN_HR_KATM_NEW_MAX_DPD_L3M] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_HR_KATM_NEW_MAX_DPD_L3M%' THEN 1
+                                       WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.fn_high_segment = 'D') AND a.FN_HR_KATM_NEW_MAX_DPD_L3M = 1 THEN 1
+                                       WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_HR_KATM_NEW_MAX_DPD_L3M = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                       ELSE 0
+                                   END
+  , [FN_HR_KATM_NEW_MAX_DPD_L12M] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_HR_KATM_NEW_MAX_DPD_L12M%' THEN 1
+                                        WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.fn_high_segment = 'D') AND a.FN_HR_KATM_NEW_MAX_DPD_L12M = 1 THEN 1
+                                        WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_HR_KATM_NEW_MAX_DPD_L12M = 1 AND   a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                        ELSE 0
+                                    END
+  , [FN_HR_KATM_NEW_MAX_DPD_L24M] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_HR_KATM_NEW_MAX_DPD_L24M%' THEN 1
+                                        WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.fn_high_segment = 'D') AND a.FN_HR_KATM_NEW_MAX_DPD_L24M = 1 THEN 1
+                                        WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_HR_KATM_NEW_MAX_DPD_L24M = 1 AND   a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                        ELSE 0
+                                    END
+  , [FN_CNT_ACT_KATM_CONTR_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_CNT_ACT_KATM_CONTR_COND_RATE%' THEN 1
+                                            WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.fn_high_segment = 'D') AND a.FN_CNT_ACT_KATM_CONTR_COND_RATE = 1 THEN 1
+                                            WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND a.FN_CNT_ACT_KATM_CONTR_COND_RATE = 1 AND   a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                            ELSE 0
+                                        END
+  , [FN_LOMBARD_HR] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_LOMBARD_HR%' THEN 1
+                          WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_LOMBARD_HR = 1 THEN 1
+                          WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2023-10-25 16:09:39.8310000') OR (a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2023-10-25 16:09:39.8310000'))) AND a.FN_LOMBARD_HR = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                          ELSE 0
+                      END
+  , [FN_APP_1D_COUNTER_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_APP_1D_COUNTER_COND_RATE%' THEN 1
+                                        WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  (a.fn_high_segment = 'D' OR ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2024-02-12 17:24:38.9840000') OR (a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2024-02-12 17:24:38.9840000'))) AND a.FN_APP_1D_COUNTER_COND_RATE = 1 THEN 1
+                                        WHEN a.fn_today < '20240801' AND  a.FN_HARD_RULE_REJECT = 1 AND  (a.FN_CR_SEGMENT_INDICATOR != 1 OR  ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2024-02-12 17:24:38.9840000') OR (a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2024-02-12 17:24:38.9840000'))) AND a.FN_APP_1D_COUNTER_COND_RATE = 1 AND  a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                        ELSE 0
+                                    END
+  , [FN_APP_7D_COUNTER_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_APP_7D_COUNTER_COND_RATE%' THEN 1
+                                        WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_APP_7D_COUNTER_COND_RATE = 1 THEN 1
+                                        WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_APP_7D_COUNTER_COND_RATE = 1 THEN 1
+                                        WHEN a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  (a.FN_CR_SEGMENT_INDICATOR != 1 OR  ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2024-03-27 07:04:12.7970000') OR (a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2024-03-27 07:04:12.7970000'))) AND a.FN_APP_7D_COUNTER_COND_RATE = 1 AND  a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                        ELSE 0
+                                    END
+  , [FN_HR_REJ_APPL_30D_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_HR_REJ_APPL_30D_COND_RATE%' THEN 1
+                                         WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_REJ_APPL_30D_COND_RATE = 1 THEN 1
+                                         ELSE 0
+                                     END
+  , [FN_HR_ADD_LOAN_AFTER_CR] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_HR_ADD_LOAN_AFTER_CR%' THEN 1
+                                    WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_HR_ADD_LOAN_AFTER_CR = 1 THEN 1
+                                    ELSE 0
+                                END
+  , [FN_HR_ADD_LOAN_DISTRIBUTION] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_HR_ADD_LOAN_DISTRIBUTION%' THEN 1
+                                        WHEN  a.fn_today < '20240801' AND a.date_start > '2024-06-19 15:40' AND  a.date_start < '2024-07-03 13:13' THEN CASE WHEN a.FN_HARD_RULE_REJECT = 1 AND  (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_HR_ADD_LOAN_DISTRIBUTION = 1 AND   a.date_start > '2024-06-19 15:40' THEN 1
+                                                                                                                               ELSE  0
+                                                                                                                           END
+                                        WHEN  a.fn_today < '20240801' AND  a.date_start > '2024-07-03 13:13' THEN CASE WHEN a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_HR_ADD_LOAN_DISTRIBUTION = 1 AND   a.date_start > '2024-07-03 13:13' THEN 1
+                                                                                        ELSE  0
+                                                                                    END
+                                        ELSE 0
+                                    END
+  , [FN_HR_TAX_PINFL_VALIDATION] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_HR_TAX_PINFL_VALIDATION%' THEN 1
+                                       WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   a.FN_HR_TAX_PINFL_VALIDATION = 1 THEN 1
+                                       ELSE 0
+                                   END
+  , [FN_HR_XALQ_PINFL_VALIDATION] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_HR_XALQ_PINFL_VALIDATION%' THEN 1
+                                        WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  a.FN_HR_XALQ_PINFL_VALIDATION = 1 THEN 1
+                                        ELSE 0
+                                    END
+  , [FN_HR_INPS_PINFL_VALIDATION] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_HR_INPS_PINFL_VALIDATION%' THEN 1
+                                        WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  a.FN_HR_INPS_PINFL_VALIDATION = 1 THEN 1
+                                        ELSE 0
+                                    END
+  , [FN_HR_LOAN_CNT_BY_TIN_ERROR] = CASE WHEN a.fn_today >= '20240801' AND  a.fn_triggered_hard_rules LIKE '%FN_HR_LOAN_CNT_BY_TIN_ERROR%' THEN 1
+                                        WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND  a.FN_HR_LOAN_CNT_BY_TIN_ERROR = 1 THEN 1
+                                        ELSE 0
+                                    END
+  , [FN_HR_TAX_NEW_LAST_7D_REP_CNT] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_HR_TAX_NEW_LAST_7D_REP_CNT%' THEN 1
+                                          WHEN a.FN_HARD_RULE_REJECT = 1 AND a.FN_HR_TAX_NEW_LAST_7D_REP_CNT = 1 THEN 1
+                                          ELSE 0
+                                      END
+  , [FN_HR_TAX_NEW_LAST_30D_REP_CNT] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_HR_TAX_NEW_LAST_30D_REP_CNT%' THEN 1
+                                           WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   a.FN_HR_TAX_NEW_LAST_30D_REP_CNT = 1 THEN 1
+                                           ELSE 0
+                                       END
+  , [FN_HR_TAX_NEW_LAST_90D_REP_CNT] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_HR_TAX_NEW_LAST_90D_REP_CNT%' THEN 1
+                                           WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   a.FN_HR_TAX_NEW_LAST_90D_REP_CNT = 1 THEN 1
+                                           ELSE 0
+                                       END
+  , [FN_MIN_INC_REQ_COND_RATE] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_MIN_INC_REQ_COND_RATE%' THEN 1
+                                     WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_MIN_INC_REQ_COND_RATE = 1 THEN 1
+                                     WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR  ((a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2023-10-25 16:09:39.8310000') OR (a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES != 1 AND  a.date_start <= '2023-10-25 16:09:39.8310000'))) AND a.FN_MIN_INC_REQ_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1
+                                     ELSE 0
+                                 END
+  , [FN_PTI_REJ_IND] = CASE WHEN a.fn_today >= '20240801' AND  a.FN_PTI_REJ_IND = 1 THEN 1
+                        WHEN a.fn_today < '20240801' AND  a.pti_rej_ind = 1 THEN 1
+                        ELSE 0  -- OLD FN_PTI_REJ_IND
+                    END
+  , [FN_HR_REJ_SEGM] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_HR_REJ_SEGM%' THEN 1
+                           WHEN a.fn_today < '20240801' AND  a.FN_HARD_RULE_REJECT = 1 AND   (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_HR_REJ_SEGM = 1 THEN 1
+                           ELSE 0
+                       END
+  , [FN_CASH_SCORING_GROUP_HR] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_CASH_SCORING_GROUP_HR%' THEN 1
+                                     WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND (a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_CASH_SCORING_GROUP_HR = 1 THEN 1
+                                     ELSE 0
+                                 END
+
+  , [fn_hr_npv_less_than_calib_pd] = CASE WHEN  a.fn_hr_npv_less_than_calib_pd = 1 THEN 1
+                                         ELSE 0
+                                     END
+  , [FN_UNDERWRITER_DEC] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_UNDERWRITER_DEC%' THEN 1
+                               WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   a.FN_UNDERWRITER_DEC = 1 THEN 1
+                               ELSE 0
+                           END
+  , [FN_HR_KATM_PASS_VALIDATION] = CASE WHEN a.fn_today >= '20240801' AND   a.fn_triggered_hard_rules LIKE '%FN_HR_KATM_PASS_VALIDATION%' THEN 1
+                                       WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND   a.FN_HR_KATM_PASS_VALIDATION = 1 THEN 1
+                                       ELSE 0
+                                   END
+  , [FN_HR_CR_D_DGTL_CARD] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_HR_CR_D_DGTL_CARD%' THEN 1
+                                 WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.FN_CR_SEGMENT_INDICATOR = 1 AND   a.FN_HR_CR_D_DGTL_CARD = 1 THEN 1
+                                 ELSE 0
+                             END
+  , [FN_HR_UCELL_D_SEG] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_HR_UCELL_D_SEG%' THEN 1
+                              WHEN  a.fn_today < '20240801' AND a.FN_HARD_RULE_REJECT = 1 AND a.FN_CR_SEGMENT_INDICATOR = 1 AND  a.FN_HR_UCELL_D_SEG = 1 THEN 1
+                              ELSE 0
+                          END
+  , [FN_HR_MIN_AGE] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_HR_MIN_AGE%' THEN 1 ELSE 0 END 
+  
+  , [FN_HR_MAX_AGE] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_HR_MAX_AGE%' THEN 1 ELSE 0 END 
+  
+  , [FN_HR_ONGOING_TMX_ACTIVE_CALL] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%ONGOING_TMX_ACTIVE_CALL%' THEN 1 ELSE 0 END 
+  
+  , [FN_PAL_CHECK_LIMIT_REJECTION] = CASE WHEN a.fn_today >= '20240801' AND a.fn_pal_check_limit_rejection = 1 THEN 1 ELSE 0 END 
+
+
+
+
+
+
+						  
+INTO    #HR_All_Rules
+FROM    DB.wings.score_icl AS a WITH(NOLOCK)
+WHERE   a.fn_today >= @date_start 
+AND   a.fn_today < @date_end 
+AND  ISNULL(a.fn_final_result,0) != 2
+AND  ISNULL(a.IN_IS_PRE_APPROVED_DISBURSE, 0) =0
+AND  ISNULL(a.IN_IS_PRE_APPROVED, 0) =0;
+
+--Старые логики которые уже не актуальны
+  --, [FN_limit_rej_ind] = CASE WHEN a.fn_today >= '20240801' AND a.fn_triggered_hard_rules LIKE '%FN_limit_rej_ind%' THEN 1  WHEN a.limit_rej_ind = 1 THEN 1   ELSE 0 END --OLD LIMIT_REJ_IND
+--,[FN_LAST_3_MONTH_DPD_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.fn_high_segment = 'D') AND a.FN_LAST_3_MONTH_DPD_COND_RATE = 1 THEN 1 ELSE 0 END 
+--,[FN_LAST_12_MONTH_DPD_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.fn_high_segment = 'D') AND a.FN_LAST_12_MONTH_DPD_COND_RATE = 1 THEN 1 ELSE 0 END 
+--,[FN_KATM_INQ_1MON_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  (  a.FN_CR_SEGMENT_INDICATOR = 1 OR  a.fn_high_segment = 'D') AND a.FN_KATM_INQ_1MON_COND_RATE = 1 THEN 1 ELSE 0 END 
+--,[FN_KATM_INQ_1MON_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  (  a.FN_CR_SEGMENT_INDICATOR = 1 OR  a.fn_high_segment = 'D') AND a.FN_KATM_INQ_1MON_COND_RATE = 1 THEN 1 ELSE 0 END 
+--,[FN_CLI_AGE_GENDER_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  (( a.FN_CR_SEGMENT_INDICATOR = 1 AND  a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.fn_high_segment = 'D') AND a.FN_CLI_AGE_GENDER_COND_RATE = 1 THEN 1 ELSE 0 END 
+--,[FN_CLIENT_AGE_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  (  a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_CLIENT_AGE_COND_RATE = 1 THEN 1 ELSE 0 END 
+--,[FN_HR_KATM_NEW_MAX_DPD_L24M] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.fn_high_segment = 'D') AND a.FN_HR_KATM_NEW_MAX_DPD_L24M = 1 THEN 1 ELSE 0 END 
+--,[FN_LOMBARD_HR] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  ( a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_LOMBARD_HR = 1 THEN 1 ELSE 0 END 
+--,[FN_CNT_ACT_KATM_CONTR_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.fn_high_segment = 'D') AND a.FN_CNT_ACT_KATM_CONTR_COND_RATE = 1 THEN 1 ELSE 0 END 
+--,[FN_HR_KATM_NEW_MAX_DPD_L12M] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.fn_high_segment = 'D') AND a.FN_HR_KATM_NEW_MAX_DPD_L12M = 1 THEN 1 ELSE 0 END 
+--,[FN_HR_KATM_NEW_MAX_DPD_L3M] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.fn_high_segment = 'D') AND a.FN_HR_KATM_NEW_MAX_DPD_L3M = 1 THEN 1 ELSE 0 END 
+--,[FN_LAST_24_MONTH_DPD_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.fn_high_segment = 'D') AND a.FN_LAST_24_MONTH_DPD_COND_RATE = 1 THEN 1 ELSE 0 END 
+--,[FN_MIN_INC_REQ_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  ( a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_MIN_INC_REQ_COND_RATE = 1 THEN 1 ELSE 0 END 
+--,[FN_APP_1D_COUNTER_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (	a.fn_high_segment = 'D' OR (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2024-02-12 17:24:38.9840000') OR ( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1 AND a.date_start <= '2024-02-12 17:24:38.9840000'))) AND a.FN_APP_1D_COUNTER_COND_RATE = 1 THEN 1 ELSE 0 END 
+--,[FN_HR_ADD_LOAN_DISTRIBUTION] = case  WHEN a.FN_HARD_RULE_REJECT=1  AND  ( a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND   a.FN_HR_ADD_LOAN_DISTRIBUTION = 1 AND a.date_start > '2024-06-19 15:40' THEN 1 ELSE 0 END 
+--,[FN_APP_7D_COUNTER_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  ( a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_APP_7D_COUNTER_COND_RATE = 1 THEN 1 ELSE 0 END 
+--,[FN_MAX_OVERDUES_TBC_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  ( a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.fn_high_segment = 'D' AND a.FN_MAX_OVERDUES_TBC_COND_RATE = 1 THEN 1 ELSE 0 END 
+--,[FN_APP_7D_COUNTER_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND  ( a.FN_CR_SEGMENT_INDICATOR != 1 OR  a.FN_CR_SEGMENT_INDICATOR IS NULL) AND  a.FN_APP_7D_COUNTER_COND_RATE = 1 THEN 1 ELSE 0 END 
+--,[FN_CLI_YOUNG_AGE_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND  a.FN_CLI_YOUNG_AGE_COND_RATE = 1 AND  a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_CLI_AGE_GENDER_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND  a.FN_CLI_AGE_GENDER_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_CLIENT_AGE_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (  a.FN_CR_SEGMENT_INDICATOR != 1 OR (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2023-10-25 16:09:39.8310000') OR ( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1 AND a.date_start <= '2023-10-25 16:09:39.8310000'))) AND a.FN_CLIENT_AGE_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_KATM_INQ_1MON_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (  a.FN_CR_SEGMENT_INDICATOR = 1 OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND  a.FN_KATM_INQ_1MON_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_LAST_3_MONTH_DPD_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND  a.FN_LAST_3_MONTH_DPD_COND_RATE = 1 AND  a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_LAST_12_MONTH_DPD_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND  a.FN_LAST_12_MONTH_DPD_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_LAST_24_MONTH_DPD_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND  a.FN_LAST_24_MONTH_DPD_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_HR_KATM_NEW_MAX_DPD_L3M] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND  a.FN_HR_KATM_NEW_MAX_DPD_L3M = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_HR_KATM_NEW_MAX_DPD_L12M] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND  a.FN_HR_KATM_NEW_MAX_DPD_L12M = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_HR_KATM_NEW_MAX_DPD_L24M] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND  a.FN_HR_KATM_NEW_MAX_DPD_L24M = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_CNT_ACT_KATM_CONTR_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1) OR  a.FN_CR_SEGMENT_INDICATOR != 1) AND  a.FN_CNT_ACT_KATM_CONTR_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_LOMBARD_HR] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (  a.FN_CR_SEGMENT_INDICATOR != 1 OR (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2023-10-25 16:09:39.8310000') OR ( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1 AND a.date_start <= '2023-10-25 16:09:39.8310000'))) AND a.FN_LOMBARD_HR = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_APP_1D_COUNTER_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (  a.FN_CR_SEGMENT_INDICATOR != 1 OR (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2024-02-12 17:24:38.9840000') OR ( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1 AND a.date_start <= '2024-02-12 17:24:38.9840000'))) AND a.FN_APP_1D_COUNTER_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_APP_7D_COUNTER_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (  a.FN_CR_SEGMENT_INDICATOR != 1 OR (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2024-03-27 07:04:12.7970000') OR ( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1 AND a.date_start <= '2024-03-27 07:04:12.7970000'))) AND a.FN_APP_7D_COUNTER_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+--,[FN_MIN_INC_REQ_COND_RATE] = case  WHEN a.FN_HARD_RULE_REJECT=1 AND (  a.FN_CR_SEGMENT_INDICATOR != 1 OR (( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.date_start > '2023-10-25 16:09:39.8310000') OR ( a.FN_CR_SEGMENT_INDICATOR = 1 AND a.DT_IDLE_SKIP_HARD_RULES !=1 AND a.date_start <= '2023-10-25 16:09:39.8310000'))) AND a.FN_MIN_INC_REQ_COND_RATE = 1 AND a.date_start <= '2024-05-08 17:42:12.394' THEN 1 ELSE 0 END 
+
+
+
+
+
+
+
+
+
+-- ========== Описание Блока: Находим для айдишников сколько ХР сработало  ==========
+-- тут мы определяем был ли вообще ХР,и если был то сколько 
+--что бы потом найти такие айдишники где сработал только один хард рул
+DROP TABLE IF EXISTS #Single_HR;
+SELECT
+    fn_today
+  , wings_id
+  , [Hard_rule_Qty] =SUM (FN_HR_PAR_APPL_DURING_BAAS +
+						  FN_ADD_LOAN_DATES_DIFF_LOAN_HR +
+						  FN_HR_TBC_PARALLEL_APPLICATION +
+						  FN_MULTI_ADD_LOAN_HR +
+						  FN_ADD_LOAN_ISSUE_CHECK +
+						  FN_NO_KATM_REP_REJ_COND_RATE +
+						  FN_HR_NO_MIB_REPORT +
+						  FN_KATM_REP_DAY_HR +
+						  FN_HR_DWH_OVRD_ERROR +
+						  FN_PSPRT_EXP_COND_RATE +
+						  FN_HR_KATM_NEW_PINFL_VALIDATION +
+						  FN_PASSPORT_SERIES_HR +
+						  FN_HR_CONSOLIDATED_LOAN +
+						  FN_HR_CASE_FOR_ADD_LOAN +
+						  FN_HR_REGION_BLOCK +
+						  FN_50BPV_LIMIT_CR +
+						  FN_LIMIT_REJ_IND +
+						  fn_tech_rej_ind +
+						  FN_CLI_YOUNG_AGE_COND_RATE +
+						  FN_CLI_AGE_GENDER_COND_RATE +
+						  FN_CLIENT_AGE_COND_RATE +
+						  FN_BL_CLIENT_COND_RATE +
+						  FN_BL_COMPANY_HR +
+						  FN_HR_REJECT_TIN +
+						  FN_BLOCKED_ACCOUNTS_COND_RATE +
+						  FN_MOB_NUMBER_ONE_CLIENT +
+						  FN_HR_NEW_ANTIFRAUD_SCORE +
+						  RL_MINZDRAV_NARKO_STATUS +
+						  RL_MINZDRAV_PSYCHO_STATUS +
+						  FN_CUR_OVRD_AMNT_REJ_COND_RATE +
+						  FN_MIB_DEBT_ALL_HR +
+						  FN_KATM_BAD_DEBT_HR +
+						  FN_MAX_OVERDUES_TBC_COND_RATE +
+						  FN_KATM_INQ_1MON_COND_RATE +
+						  FN_LAST_3_MONTH_DPD_COND_RATE +
+						  FN_LAST_12_MONTH_DPD_COND_RATE +
+						  FN_LAST_24_MONTH_DPD_COND_RATE +
+						  FN_HR_KATM_NEW_MAX_DPD_L3M +
+						  FN_HR_KATM_NEW_MAX_DPD_L12M +
+						  FN_HR_KATM_NEW_MAX_DPD_L24M +
+						  FN_CNT_ACT_KATM_CONTR_COND_RATE +
+						  FN_LOMBARD_HR +
+						  FN_APP_1D_COUNTER_COND_RATE +
+						  FN_APP_7D_COUNTER_COND_RATE +
+						  FN_HR_REJ_APPL_30D_COND_RATE +
+						  FN_HR_ADD_LOAN_AFTER_CR +
+						  FN_HR_ADD_LOAN_DISTRIBUTION +
+						  FN_HR_TAX_PINFL_VALIDATION +
+						  FN_HR_XALQ_PINFL_VALIDATION +
+						  FN_HR_INPS_PINFL_VALIDATION +
+						  FN_HR_LOAN_CNT_BY_TIN_ERROR +
+						  FN_HR_TAX_NEW_LAST_7D_REP_CNT +
+						  FN_HR_TAX_NEW_LAST_30D_REP_CNT +
+						  FN_HR_TAX_NEW_LAST_90D_REP_CNT +
+						  FN_MIN_INC_REQ_COND_RATE +
+						  fn_pti_rej_ind +
+						  FN_HR_REJ_SEGM +
+						  FN_CASH_SCORING_GROUP_HR +
+						  fn_hr_npv_less_than_calib_pd +
+						  FN_UNDERWRITER_DEC +
+						  FN_HR_KATM_PASS_VALIDATION +
+						  FN_HR_CR_D_DGTL_CARD +
+						  FN_HR_UCELL_D_SEG +
+						  FN_HR_MIN_AGE +
+						  FN_HR_MAX_AGE +
+						  FN_HR_ONGOING_TMX_ACTIVE_CALL + 
+						  FN_PAL_CHECK_LIMIT_REJECTION 
+)
+INTO    #Single_HR
+FROM    #HR_All_Rules
+GROUP BY fn_today
+	    ,wings_id;
+
+-- ========== Описание Блока: Создаем единую таблицу с ХР ==========
+-- тут мы обьеденяем все таблицы и получаем результат - Одну таблицу
+-- Удаляем старые записи и заливаем новые
+
+
+
+DELETE FROM  Riskdb.dbo.Hard_Rules WHERE fn_today >= @date_start  AND fn_today  < @date_end 
+INSERT INTO  Riskdb.dbo.Hard_Rules
+SELECT
+    hrp.fn_today
+  , hrp.fn_final_result
+  , hrp.wings_id
+  , hrp.Priority_Hard_rule
+  , sh.Hard_rule_Qty
+  , hrp.fn_triggered_hard_rules
+  , hrp.fn_high_segment
+  , hrp.fn_tbc_add_loan_indicator
+  , hrp.fn_cr_segment_indicator
+  , hrp.fn_repeated_client
+  , hrp.fn_add_loan_behavioural_indic
+  , i.[6m_status]
+  , i.Test_Group
+  --  [Hard_rule_Qty_D] = CASE WHEN sh.Hard_rule_Qty = 0 THEN 'Without_HR'
+  --						 WHEN sh.Hard_rule_Qty = 1 THEN 'Only_One_HR'
+  --						 WHEN sh.Hard_rule_Qty >1 THEN 'Multiple_HRs'
+  --						 ELSE null END ,
+  -- hrp.Priority_data_flag,
+  , hra.FN_HR_PAR_APPL_DURING_BAAS
+  , hra.FN_ADD_LOAN_DATES_DIFF_LOAN_HR
+  , hra.FN_HR_TBC_PARALLEL_APPLICATION
+  , hra.FN_MULTI_ADD_LOAN_HR
+  , hra.FN_ADD_LOAN_ISSUE_CHECK
+  , hra.FN_NO_KATM_REP_REJ_COND_RATE
+  , hra.FN_HR_NO_MIB_REPORT
+  , hra.FN_KATM_REP_DAY_HR
+  , hra.FN_HR_DWH_OVRD_ERROR
+  , hra.FN_PSPRT_EXP_COND_RATE
+  , hra.FN_HR_KATM_NEW_PINFL_VALIDATION
+  , hra.FN_PASSPORT_SERIES_HR
+  , hra.FN_HR_CONSOLIDATED_LOAN
+  , hra.FN_HR_CASE_FOR_ADD_LOAN
+  , hra.FN_HR_REGION_BLOCK
+  , hra.FN_50BPV_LIMIT_CR
+  , hra.FN_LIMIT_REJ_IND
+  , hra.fn_tech_rej_ind
+  , hra.FN_CLI_YOUNG_AGE_COND_RATE
+  , hra.FN_CLI_AGE_GENDER_COND_RATE
+  , hra.FN_CLIENT_AGE_COND_RATE
+  , hra.FN_BL_CLIENT_COND_RATE
+  , hra.FN_BL_COMPANY_HR
+  , hra.FN_HR_REJECT_TIN
+  , hra.FN_BLOCKED_ACCOUNTS_COND_RATE
+  , hra.FN_MOB_NUMBER_ONE_CLIENT
+  , hra.FN_HR_NEW_ANTIFRAUD_SCORE
+  , hra.RL_MINZDRAV_NARKO_STATUS
+  , hra.RL_MINZDRAV_PSYCHO_STATUS
+  , hra.FN_CUR_OVRD_AMNT_REJ_COND_RATE
+  , hra.FN_MIB_DEBT_ALL_HR
+  , hra.FN_KATM_BAD_DEBT_HR
+  , hra.FN_MAX_OVERDUES_TBC_COND_RATE
+  , hra.FN_KATM_INQ_1MON_COND_RATE
+  , hra.FN_LAST_3_MONTH_DPD_COND_RATE
+  , hra.FN_LAST_12_MONTH_DPD_COND_RATE
+  , hra.FN_LAST_24_MONTH_DPD_COND_RATE
+  , hra.FN_HR_KATM_NEW_MAX_DPD_L3M
+  , hra.FN_HR_KATM_NEW_MAX_DPD_L12M
+  , hra.FN_HR_KATM_NEW_MAX_DPD_L24M
+  , hra.FN_CNT_ACT_KATM_CONTR_COND_RATE
+  , hra.FN_LOMBARD_HR
+  , hra.FN_APP_1D_COUNTER_COND_RATE
+  , hra.FN_APP_7D_COUNTER_COND_RATE
+  , hra.FN_HR_REJ_APPL_30D_COND_RATE
+  , hra.FN_HR_ADD_LOAN_AFTER_CR
+  , hra.FN_HR_ADD_LOAN_DISTRIBUTION
+  , hra.FN_HR_TAX_PINFL_VALIDATION
+  , hra.FN_HR_XALQ_PINFL_VALIDATION
+  , hra.FN_HR_INPS_PINFL_VALIDATION
+  , hra.FN_HR_LOAN_CNT_BY_TIN_ERROR
+  , hra.FN_HR_TAX_NEW_LAST_7D_REP_CNT
+  , hra.FN_HR_TAX_NEW_LAST_30D_REP_CNT
+  , hra.FN_HR_TAX_NEW_LAST_90D_REP_CNT
+  , hra.FN_MIN_INC_REQ_COND_RATE
+  , hra.fn_pti_rej_ind
+  , hra.FN_HR_REJ_SEGM
+  , hra.FN_CASH_SCORING_GROUP_HR
+  , hra.fn_hr_npv_less_than_calib_pd
+  , hra.FN_UNDERWRITER_DEC
+  , hra.FN_HR_KATM_PASS_VALIDATION
+  , hra.FN_HR_CR_D_DGTL_CARD
+  , hra.FN_HR_UCELL_D_SEG
+  ,	hra.FN_HR_MIN_AGE 
+  ,	hra.FN_HR_MAX_AGE 
+  ,	hra.FN_HR_ONGOING_TMX_ACTIVE_CALL 
+  ,	hra.FN_PAL_CHECK_LIMIT_REJECTION 
+FROM    #Hard_Rule_Priority AS hrp
+        LEFT JOIN #Single_HR AS sh ON sh.fn_today = hrp.fn_today AND   sh.wings_id = hrp.wings_id
+        LEFT JOIN #HR_All_Rules AS hra ON hrp.fn_today = hra.fn_today AND  hrp.wings_id = hra.wings_id
+		LEFT JOIN riskdb.dbo.ICL_Apps AS i ON hrp.Wings_ID = i.wingsid 
+
+
+		DECLARE @EndTime DATETIME = GETDATE();
+DECLARE @DurationSeconds INT = DATEDIFF(SECOND, @StartTime, @EndTime);
+DECLARE @DurationFormatted VARCHAR(8) = CONVERT(VARCHAR(8), DATEADD(SECOND, @DurationSeconds, 0), 108);
+
+UPDATE RiskDB.system.TableUpdateLog
+SET EndTime = @EndTime,
+    Duration = @DurationSeconds,
+    DurationFormatted = @DurationFormatted,
+	  Status = 'Updated'
+WHERE RunID = @RunID;
+
+
+END
+
+GO
+
+
