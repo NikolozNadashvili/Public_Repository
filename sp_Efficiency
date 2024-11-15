@@ -1,0 +1,389 @@
+
+
+USE [RiskDB]
+GO
+
+/****** Object:  StoredProcedure [dbo].[sp_Efficiency]    Script Date: 11/13/2024 3:21:54 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+ALTER PROCEDURE [dbo].[sp_Efficiency]
+AS
+BEGIN
+
+-- =============================================
+-- Procedure: [dbo].[sp_Efficiency]
+-- Created By: Nikoloz Nadashvili
+-- Created Date: --
+-- Last Script Update Date: 2024/11/15
+-- AVG run time : 5 - 7 min from start of month,4+ Hours for full period 
+-- Description: 
+--Отчет создан для БИ репорта коллешкена,показывает сколько новых айдишников добавляются каждый день,
+--Платежи в конкретные дни а так же некоторые кумулятивные характеристики 
+--В скрипте я попытался описать примерно что и где делаю
+-- =============================================
+
+	 -- ========== Описание Блока: Удаление дублирующихся записей ==========
+-- Для логов в нашей таблице riskdb.system.TableUpdateLog
+
+	DECLARE @RunID INT;
+	DECLARE @StartTime DATETIME = GETDATE();
+
+	INSERT INTO RiskDB.system.TableUpdateLog (ProcedureName, TableName, StartTime, Status, LogDate)
+	VALUES ('sp_Efficiency', 'Overdue_flow', @StartTime, 'In Progress', CAST(GETDATE() AS DATE));
+
+	SET @RunID = SCOPE_IDENTITY();
+
+
+
+
+
+	 -- ========== Описание Блока: Старт ==========
+-- Декларируем ништяки и создаем временную таблицу агг
+
+
+DECLARE @from_which_Month DATE = '20240701'--Сюда пишем дату и исходя из этого скрипт заработает в того месяца
+DECLARE @date_for_id_cycle DATE = DATEFROMPARTS(YEAR(@from_which_Month), MONTH(@from_which_Month), 1); -- Для цикла ниже
+DECLARE @goal DATE = GETDATE();-- Для цикла ниже
+DECLARE	@date_start	DATE = DATEADD(DAY,-1,@date_for_id_cycle); -- Для снепов,что бы брал на 1 день меньше 
+
+
+	 -- ========== Описание Блока: Создаем единые выдачи==========
+-- Тут мы берём все данные из АГГ
+
+	DROP TABLE IF EXISTS #Union_Snaps 
+	 SELECT 
+			[loan_id] = CAST(v2.loan_id AS VARCHAR(15))
+		  , [Product] = CASE	  WHEN v2.loan_type ='ICL' THEN 1 
+								  WHEN v2.loan_type ='BNPL' THEN 2
+								  WHEN v2.loan_type ='CAR' THEN 7
+								  ELSE NULL 
+					   END 
+	      , [Product_subtype] = v2.loan_type
+	      , [calc_day] = DATEADD(DAY,1,v2.calc_day)
+		  , [PD_Bucket] = CASE WHEN ISNULL(v2.Overdue_Days,0) > 360 THEN 'n. 360+'
+							  WHEN ISNULL(v2.Overdue_Days,0) > 330 THEN 'm. 331 - 360'
+							  WHEN ISNULL(v2.Overdue_Days,0) > 300 THEN 'l. 201 - 330'
+							  WHEN ISNULL(v2.Overdue_Days,0) > 270 THEN 'k. 271 - 300'
+							  WHEN ISNULL(v2.Overdue_Days,0) > 240 THEN 'j. 241 - 270'
+							  WHEN ISNULL(v2.Overdue_Days,0) > 210 THEN 'i. 211 - 240'
+							  WHEN ISNULL(v2.Overdue_Days,0) > 180 THEN 'h. 181 - 210'
+							  WHEN ISNULL(v2.Overdue_Days,0) > 150 THEN 'g. 151 - 180'
+							  WHEN ISNULL(v2.Overdue_Days,0) > 120 THEN 'f. 121 - 150'
+							  WHEN ISNULL(v2.Overdue_Days,0) > 90  THEN 'e. 91 - 120'
+							  WHEN ISNULL(v2.Overdue_Days,0) > 60  THEN 'd. 61 - 90'
+							  WHEN ISNULL(v2.Overdue_Days,0) > 30  THEN 'c. 31 - 60'
+							  WHEN ISNULL(v2.Overdue_Days,0) > 0   THEN 'b. 1 - 30'  
+							  ELSE 'a. No DPD' 
+						END
+		  ,[WOF] = CASE WHEN v2.date_offbalance <= v2.calc_day THEN 1 ELSE 0 END
+		  ,[Amount_Due] =  ISNULL(v2.overdue_principal,0)+ISNULL(v2.overdue_interest,0)+ISNULL(v2.penalty,0)
+						  +ISNULL(v2.fees_due,0) +ISNULL(v2.litigation_principal,0) +ISNULL(v2.offbalance_principal,0)
+						  +ISNULL(v2.offbalance_fees_due,0) +ISNULL(v2.offbalance_interest,0)  
+		  ,[LIT_Amount_Due] = ISNULL(v2.total_principal,0) + ISNULL(v2.total_accruals,0) 
+		  ,[WOF_Amount_Due] = ISNULL(v2.total_principal,0) + ISNULL(v2.total_accruals,0) 
+	 INTO #Union_Snaps
+	 FROM db.uzdwh.loan_portfolio_agg AS v2 	WITH (NOLOCK)
+	
+	 WHERE v2.calc_day >=  @date_start
+	 AND ISNULL(v2.overdue_days,0) > 0
+	 AND v2.loan_type!= 'MSME'
+ 
+-- Тут мы берём все данные для ТФС
+	INSERT INTO #Union_Snaps
+  SELECT		
+  	
+				 [loan_id] =  a.appl_id
+			   , [Product] = '2'
+			   , [Product_Subtype] = 'TFS'
+               , [calculation_date] = DATEADD(DAY,1,CAST( a.calculation_date AS DATE))
+			   , [PD_Bucket] = CASE WHEN ISNULL(a.current_overdue_days,0) > 360 THEN 'n. 360+'
+								    WHEN ISNULL(a.Current_Overdue_Days,0) > 330 THEN 'm. 331 - 360'
+								    WHEN ISNULL(a.Current_Overdue_Days,0) > 300 THEN 'l. 201 - 330'
+								    WHEN ISNULL(a.Current_Overdue_Days,0) > 270 THEN 'k. 271 - 300'
+								    WHEN ISNULL(a.Current_Overdue_Days,0) > 240 THEN 'j. 241 - 270'
+								    WHEN ISNULL(a.Current_Overdue_Days,0) > 210 THEN 'i. 211 - 240'
+								    WHEN ISNULL(a.Current_Overdue_Days,0) > 180 THEN 'h. 181 - 210'
+								    WHEN ISNULL(a.Current_Overdue_Days,0) > 150 THEN 'g. 151 - 180'
+								    WHEN ISNULL(a.Current_Overdue_Days,0) > 120 THEN 'f. 121 - 150'
+								    WHEN ISNULL(a.Current_Overdue_Days,0) > 90  THEN 'e. 91 - 120'
+								    WHEN ISNULL(a.Current_Overdue_Days,0) > 60  THEN 'd. 61 - 90'
+								    WHEN ISNULL(a.Current_Overdue_Days,0) > 30  THEN 'c. 31 - 60'
+								    WHEN ISNULL(a.Current_Overdue_Days,0) > 0   THEN 'b. 1 - 30'  
+								    ELSE 'a. No DPD' 
+								END
+			  
+			   ,[WOF] = CASE WHEN (CASE WHEN a.write_off_date = '0001-01-01 00:00:00.0000000'  THEN NULL 
+										WHEN a.write_off_date IS NULL  THEN NULL 
+										ELSE CAST(a.write_off_date AS DATE)
+								  END ) <= a.calculation_date 
+							 THEN 1 
+							 ELSE 0 
+						END
+			  , [Amount_Due] = ISNULL(a.principal_overdue, 0) + ISNULL(a.interest_overdue, 0) + ISNULL(a.penalty_balance, 0)  
+			  , [LIT_Amount_Due] = ISNULL(a.principal_balance, 0) + ISNULL(a.interest_balance, 0) + ISNULL(a.penalty_balance,0) 
+			  , [WOF_Amount_Due] = 0  
+
+  FROM RiskDB.dbo.vwInstallmentSnapshots  AS a WITH(NOLOCK)
+  WHERE a.calculation_date >= @date_start 
+		AND ISNULL(a.current_overdue_days,0) > 0
+
+--Обьеденяем в одно и джоиним нужные вещи
+  DROP TABLE IF EXISTS #Total_Snapshots
+   SELECT		  sn.loan_id
+                , sn.Product
+                , sn.Product_subtype
+                , sn.calc_day
+                , sn.PD_Bucket
+                , sn.WOF
+                , sn.Amount_Due
+                , sn.LIT_Amount_Due
+                , sn.WOF_Amount_Due
+				, [CLient_Type] = t.[6m_status]  
+				, [Segment] = t.fn_high_segment  
+				, [Lit] = CASE WHEN l.date_litigation <= sn.calc_day THEN 1  ELSE 0 END
+	INTO #Total_Snapshots
+   FROM #Union_Snaps AS sn
+   LEFT JOIN	RiskDB.dbo.Total_Apps AS  t with(NOLOCK) ON		t.ID_D  =  sn.loan_id 
+   LEFT JOIN    riskdb.dbo.litigations_agg AS l WITH(NOLOCK) ON l.Loan_id = sn.loan_id 
+
+
+   
+   	 -- ========== Описание Блока: Цикл ==========
+  /*
+  Логика цикла ниже следующая - 
+  мы берем для первого числа айдишники(на самом деле это на день меньше в снепах) 
+  и сохраняем ее. В дальнейшем в этом месяце мы будем накопительно вычитать айдишники.
+  К примеру для 4 числа мы находим айдишники(с бакетами) которых не было 1,2,3 числа и сохраняем ее
+  В новом месяце делаем тоже самое 
+
+  #Monthly_Loans_Final --в этой таблице заливаются данные которые дальше используются
+  #Monthly_Loans -- рабочая таблица для цикла в разрезе месяца 
+  */
+   
+-- Итоговая таблица, которая будет хранить уникальные ID по месяцам
+DROP TABLE IF EXISTS #Monthly_Loans_Final;
+CREATE TABLE #Monthly_Loans_Final (
+    loan_id VARCHAR(15),
+    calc_day DATE,
+    PD_Bucket VARCHAR(15)
+);
+
+-- Временная таблица для текущего месяца
+DROP TABLE IF EXISTS #Monthly_Loans;
+CREATE TABLE #Monthly_Loans (
+    loan_id VARCHAR(15),
+    calc_day DATE,
+    PD_Bucket VARCHAR(15)
+);
+
+
+WHILE @date_for_id_cycle < @goal
+BEGIN  
+    -- Если это первый день нового месяца, добавляем все ID за этот день и сохраняем в итоговую таблицу
+    IF DAY(@date_for_id_cycle) = 1 
+    BEGIN
+        -- Очищаем временную таблицу для нового месяца
+        DELETE FROM #Monthly_Loans;
+
+        -- Добавляем все ID только для первого дня текущего месяца
+        INSERT INTO #Monthly_Loans
+        SELECT DISTINCT loan_id, @date_for_id_cycle AS calc_day, PD_Bucket
+        FROM #Total_Snapshots
+        WHERE calc_day = @date_for_id_cycle;
+
+        -- Копируем данные текущего месяца в итоговую таблицу
+        INSERT INTO #Monthly_Loans_Final
+        SELECT * 
+        FROM #Monthly_Loans;
+    END
+    ELSE
+    BEGIN
+        -- Добавляем только новые ID для последующих дней месяца, которых нет в итоговой таблице
+        INSERT INTO #Monthly_Loans
+        SELECT DISTINCT loan_id, @date_for_id_cycle AS calc_day, PD_Bucket
+        FROM #Total_Snapshots AS v2
+        WHERE v2.calc_day = @date_for_id_cycle
+          AND NOT EXISTS (
+              SELECT 1 
+              FROM #Monthly_Loans_Final AS ml
+              WHERE ml.loan_id COLLATE DATABASE_DEFAULT = v2.loan_id
+                AND YEAR(ml.calc_day) = YEAR(@date_for_id_cycle)
+                AND MONTH(ml.calc_day) = MONTH(@date_for_id_cycle)
+                AND ml.PD_Bucket COLLATE DATABASE_DEFAULT  = v2.PD_Bucket
+          );
+
+        -- Копируем новые данные в итоговую таблицу
+        INSERT INTO #Monthly_Loans_Final
+        SELECT * 
+        FROM #Monthly_Loans;
+    END;
+
+    -- Переход к следующему дню
+    SET @date_for_id_cycle = DATEADD(DAY, 1, @date_for_id_cycle);
+END;
+
+
+--Тут я фильтрую айдишники из всех снепов только на те которые я залил в снепах
+--+ я проставляю правильную сумму которую я заберу в БИ
+	DROP TABLE IF EXISTS  #Final_table
+	SELECT
+				 [hist_date] = v2.calc_day 
+				,v2.Product 
+				,v2.Product_subtype 
+				,v2.Wof 
+				,v2.LIT 
+				,v2.CLient_Type
+				,v2.segment 
+				,[OvdDays] = ISNULL(v2.[PD_Bucket], 'o. Closed') 
+				,[Overdue_Amount] = 	SUM(CASE WHEN v2.WOF = 1  THEN ISNULL(v2.WOF_Amount_Due, v2.Amount_Due)
+											 WHEN v2.Lit = 1 THEN  ISNULL(v2.LIT_Amount_Due, v2.Amount_Due)
+											 ELSE v2.Amount_Due 
+										END) 
+				,[Qty] = SUM(1)
+	INTO #Final_table
+	FROM #Total_Snapshots AS v2 	
+	WHERE	    EXISTS ( SELECT 1 FROM  #Monthly_Loans_Final AS a WHERE a.loan_id  COLLATE DATABASE_DEFAULT = v2.loan_id AND a.calc_day = v2.calc_day AND v2.PD_Bucket COLLATE DATABASE_DEFAULT= a.PD_Bucket)
+	GROUP BY	 ISNULL ( v2.[PD_Bucket], 'o. Closed' )
+               , v2.calc_day
+               , v2.Product
+               , v2.Product_subtype
+               , v2.WOF
+               , v2.Lit
+               , v2.CLient_Type
+               , v2.Segment
+
+
+	 -- ========== Описание Блока: Платежи ==========
+-- группировка и создание таблицы по платежам
+
+	DROP TABLE IF EXISTS #PMT
+		SELECT		LoanRepaymentDate,
+					LoanID,
+					SUM(PaymentAmount) AS Payment
+		  INTO #PMT
+		FROM		db.calc.PaymentAgentImpact with(NOLOCK)
+		 WHERE		LoanRepaymentDate >= @date_start
+		 GROUP BY	LoanRepaymentDate,LoanID
+	  
+	  	   
+--Нахожу платежи по дням,связываю с аппами что бы к ним привязать флаги для БИ
+	DROP TABLE IF EXISTS  #Payments_aggregated
+	 SELECT 
+		
+	                us.calc_day
+	              , us.Product
+	              , us.Product_subtype
+	              , us.PD_Bucket
+	              , us.Lit
+	              , us.WOF
+	              , us.CLient_Type
+	              , us.Segment
+	              , [Payment] = SUM(ISNULL(p.Payment,0))
+	 INTO #Payments_aggregated
+	 FROM #Total_Snapshots AS us
+	 LEFT JOIN #PMT AS p ON p.LoanId = us.loan_id AND us.calc_day = p.LoanRepaymentDate
+	 GROUP BY	  us.calc_day
+				, us.Product
+				, us.Product_subtype
+				, us.PD_Bucket
+				, us.Lit
+				, us.WOF
+				, us.CLient_Type
+				, us.Segment 
+
+
+			
+
+
+	
+		 -- ========== Описание Блока: Обьедениение и джионы ==========
+	-- Важный момент. Создаю сначал комбинации и потом джоиню к ним,
+	-- что бы не получилось так что допустим какая та комбинация не папала в снепы,но есть платежи
+	-- и джоин их не подхватит,по этому страхуюсь так 
+	
+			DROP TABLE IF EXISTS #Table_For_Join
+			SELECT  DISTINCT  a.calc_day
+							, a.Product
+							, a.Product_subtype
+							, a.PD_Bucket
+							, a.Lit
+							, a.WOF
+							, a.CLient_Type
+							, a.Segment
+			INTO #Table_For_Join
+			FROM #Total_Snapshots AS a 
+
+	
+			
+
+			--Обьединяем и заливаем всё
+			DELETE FROM Riskdb.dbo.Overdue_flow WHERE Hist_Date >= DATEADD(DAY, 1, @date_start) ; -- так как старт у нас на день меньше,
+			--тут мы добавляем что бы данные с начала месяца залились
+
+			INSERT INTO Riskdb.test.Overdue_flow
+			SELECT			  [Hist_date] = a.calc_day
+							,  a.Product
+							,  a.Product_subtype
+							,  a.Lit
+							,  a.WOF
+							,  a.CLient_Type
+							,  a.Segment
+							,  [OvdDays] = a.PD_Bucket
+							,  [Overdue_Amount] = ISNULL(c.Overdue_Amount,0)
+							,  b.Payment
+							,  [Qty] = ISNULL(c.Qty,0)
+
+			FROM #Table_For_Join AS a 
+			LEFT JOIN #Final_table			AS c ON	  a.calc_day = c.hist_date
+														AND a.Product = c.Product
+														AND a.Product_subtype = c.Product_subtype
+														AND a.PD_Bucket = c.OvdDays
+														AND a.Lit = c.Lit
+														AND a.WOF = c.WOF
+														AND a.CLient_Type = c.CLient_Type
+														AND a.Segment = c.Segment
+		    LEFT JOIN #Payments_aggregated  AS b ON  a.calc_day = b.calc_day
+														AND a.Product = b.product
+														AND a.Product_subtype = b.Product_subtype
+														AND a.PD_Bucket = b.PD_Bucket
+														AND a.Lit = b.Lit
+														AND a.WOF = b.wof
+														AND a.CLient_Type = b.CLient_Type
+														AND a.Segment = b.Segment
+			
+
+		
+
+				
+	DECLARE @EndTime DATETIME = GETDATE();
+	DECLARE @DurationSeconds INT = DATEDIFF(SECOND, @StartTime, @EndTime);
+	DECLARE @DurationFormatted VARCHAR(8) = CONVERT(VARCHAR(8), DATEADD(SECOND, @DurationSeconds, 0), 108);
+
+	UPDATE RiskDB.system.TableUpdateLog
+	SET EndTime = @EndTime,
+		Duration = @DurationSeconds,
+		DurationFormatted = @DurationFormatted,
+		Status = 'Updated'
+	WHERE RunID = @RunID
+
+
+  		
+ drop table  #Union_Snaps
+ drop table  #Total_Snapshots
+ drop table  #Monthly_Loans_Final
+ drop table  #Monthly_Loans
+ drop table  #PMT
+ drop table  #Table_For_Join
+
+
+END
+
+
+GO
+
+
